@@ -1,0 +1,1256 @@
+//! Wiring this into every agent on the machine.
+//!
+//! Two things have to happen for shared memory to actually get used:
+//!
+//! 1. Register the MCP server in each agent's config. Every agent invented its
+//!    own file and its own JSON shape, so there is a table of them below.
+//! 2. Tell the agent *when* to call the tools, by writing a marked block into
+//!    the instruction file it reads (`AGENTS.md`, or `CLAUDE.md` for Claude Code).
+//!    Without this, the tools exist and nothing ever calls them.
+//!
+//! Everything here is idempotent, backs up before it writes, and can be undone.
+
+use anyhow::{Context, Result};
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+
+use crate::config::now;
+
+pub const SERVER_NAME: &str = "fuckmemory";
+const BEGIN: &str = "<!-- fuckmemory:begin -->";
+const END: &str = "<!-- fuckmemory:end -->";
+
+/// The block written into agent instruction files.
+///
+/// Deliberately short: it is prepended to every single session, so every line
+/// costs tokens forever. It only answers "when do I call these tools".
+pub const INSTRUCTIONS: &str = r#"## Persistent memory
+
+You share a persistent memory with every other agent on this machine, through the
+`fuckmemory` MCP server. It survives across sessions, tools, and repos.
+
+- **Before** assuming a convention, a command, a past decision, or a user
+  preference: call `recall` with what you are trying to find out. Do this at the
+  start of a task, not after guessing wrong.
+- **After** learning something that will still matter in a future session — a
+  decision and the reason for it, a preference, a command that actually works, a
+  constraint, a gotcha that cost you time — call `remember`. Pass `facts` with
+  subject/relation/object when you can.
+- Never store secrets, credentials, transient state, or anything that can be
+  re-read from the code.
+- If something you recalled turns out to be wrong or stale, call `forget` on it.
+  Leaving a wrong memory in place is worse than having no memory.
+- To ask what changed over time ("what did we use before?"), call `timeline`."#;
+
+/// Shape of the MCP registration each agent expects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// `{"mcpServers": {name: {command, args}}}` — the de-facto standard.
+    McpServers,
+    /// `{"servers": {name: {type: "stdio", command, args}}}` — VS Code.
+    VsCodeServers,
+    /// `{"mcp": {name: {type: "local", command: [...], enabled: true}}}` — OpenCode.
+    OpenCode,
+    /// `[mcp_servers.name]` in TOML — Codex.
+    CodexToml,
+    /// Detected, but its MCP format isn't verified. We print a snippet instead of
+    /// writing a guess into a real config file.
+    Manual,
+}
+
+/// Where an agent keeps its event hooks, when we know the format well enough to
+/// write it. Autosave needs a hook per prompt, and guessing at an unverified
+/// schema would silently do nothing (or worse, break the agent's startup).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookFormat {
+    /// Claude Code's `settings.json`: `hooks.<Event>[].hooks[] = {type, command}`.
+    ClaudeSettings,
+}
+
+pub struct Agent {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// Binaries that prove this agent is installed.
+    pub bins: &'static [&'static str],
+    /// `$HOME`-relative directories that also prove it.
+    pub dirs: &'static [&'static str],
+    /// `$HOME`-relative MCP config candidates, most-preferred first. An existing
+    /// file always wins over creating a new one (OpenCode users often have
+    /// `opencode.jsonc`, not `opencode.json`).
+    pub global_mcp: &'static [&'static str],
+    /// Project-relative MCP config.
+    pub project_mcp: Option<&'static str>,
+    pub format: Format,
+    /// Project-relative instruction file.
+    pub project_instructions: &'static str,
+    /// `$HOME`-relative instruction file.
+    pub global_instructions: Option<&'static str>,
+    /// `$HOME`-relative settings file that holds event hooks, and its format.
+    pub hooks: Option<(&'static str, HookFormat)>,
+    /// Project-relative equivalent.
+    pub project_hooks: Option<&'static str>,
+}
+
+/// The registry. Paths and shapes verified against each tool's documentation.
+pub const AGENTS: &[Agent] = &[
+    Agent {
+        id: "claude-code",
+        name: "Claude Code",
+        bins: &["claude"],
+        dirs: &[".claude"],
+        global_mcp: &[".claude.json"],
+        project_mcp: Some(".mcp.json"),
+        format: Format::McpServers,
+        // Claude Code reads CLAUDE.md natively and AGENTS.md only via import.
+        project_instructions: "CLAUDE.md",
+        global_instructions: Some(".claude/CLAUDE.md"),
+        hooks: Some((".claude/settings.json", HookFormat::ClaudeSettings)),
+        project_hooks: Some(".claude/settings.json"),
+    },
+    Agent {
+        id: "codex",
+        name: "OpenAI Codex CLI",
+        bins: &["codex"],
+        dirs: &[".codex"],
+        global_mcp: &[".codex/config.toml"],
+        project_mcp: None,
+        format: Format::CodexToml,
+        project_instructions: "AGENTS.md",
+        global_instructions: Some(".codex/AGENTS.md"),
+        hooks: None,
+        project_hooks: None,
+    },
+    Agent {
+        id: "gemini-cli",
+        name: "Gemini CLI",
+        bins: &["gemini"],
+        dirs: &[".gemini"],
+        global_mcp: &[".gemini/settings.json"],
+        project_mcp: Some(".gemini/settings.json"),
+        format: Format::McpServers,
+        project_instructions: "AGENTS.md",
+        global_instructions: Some(".gemini/GEMINI.md"),
+        hooks: None,
+        project_hooks: None,
+    },
+    Agent {
+        id: "antigravity",
+        name: "Antigravity CLI",
+        bins: &["agy"],
+        dirs: &[".antigravity", ".gemini/config"],
+        global_mcp: &[".gemini/config/mcp_config.json"],
+        project_mcp: Some(".agents/mcp_config.json"),
+        format: Format::McpServers,
+        project_instructions: "AGENTS.md",
+        global_instructions: None,
+        hooks: None,
+        project_hooks: None,
+    },
+    Agent {
+        id: "opencode",
+        name: "OpenCode",
+        bins: &["opencode"],
+        dirs: &[".config/opencode", ".opencode"],
+        global_mcp: &[
+            ".config/opencode/opencode.jsonc",
+            ".config/opencode/opencode.json",
+        ],
+        project_mcp: Some("opencode.json"),
+        format: Format::OpenCode,
+        project_instructions: "AGENTS.md",
+        global_instructions: Some(".config/opencode/AGENTS.md"),
+        hooks: None,
+        project_hooks: None,
+    },
+    Agent {
+        id: "qwen",
+        name: "Qwen Code",
+        bins: &["qwen"],
+        dirs: &[".qwen"],
+        global_mcp: &[".qwen/settings.json"],
+        project_mcp: Some(".qwen/settings.json"),
+        format: Format::McpServers,
+        project_instructions: "AGENTS.md",
+        global_instructions: Some(".qwen/QWEN.md"),
+        hooks: None,
+        project_hooks: None,
+    },
+    Agent {
+        id: "cursor",
+        name: "Cursor",
+        bins: &["cursor-agent", "cursor"],
+        dirs: &[".cursor"],
+        global_mcp: &[".cursor/mcp.json"],
+        project_mcp: Some(".cursor/mcp.json"),
+        format: Format::McpServers,
+        project_instructions: "AGENTS.md",
+        global_instructions: None,
+        hooks: None,
+        project_hooks: None,
+    },
+    Agent {
+        id: "copilot-cli",
+        name: "GitHub Copilot CLI",
+        bins: &["copilot"],
+        dirs: &[".copilot", ".config/github-copilot"],
+        global_mcp: &[".copilot/mcp-config.json"],
+        project_mcp: Some(".mcp.json"),
+        format: Format::McpServers,
+        project_instructions: "AGENTS.md",
+        global_instructions: None,
+        hooks: None,
+        project_hooks: None,
+    },
+    Agent {
+        id: "vscode",
+        name: "VS Code (Copilot Chat)",
+        bins: &["code", "code-insiders"],
+        dirs: &[".vscode", ".config/Code"],
+        // The user-profile mcp.json path is platform- and profile-dependent, so
+        // only the workspace file is written.
+        global_mcp: &[],
+        project_mcp: Some(".vscode/mcp.json"),
+        format: Format::VsCodeServers,
+        project_instructions: "AGENTS.md",
+        global_instructions: None,
+        hooks: None,
+        project_hooks: None,
+    },
+    Agent {
+        id: "kimi-code",
+        name: "Kimi Code",
+        bins: &["kimi"],
+        dirs: &[".kimi-code"],
+        global_mcp: &[],
+        project_mcp: None,
+        format: Format::Manual,
+        project_instructions: "AGENTS.md",
+        global_instructions: None,
+        hooks: None,
+        project_hooks: None,
+    },
+];
+
+pub fn agent_by_id(id: &str) -> Option<&'static Agent> {
+    AGENTS.iter().find(|a| a.id == id)
+}
+
+fn on_path(bin: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|p| {
+        let c = p.join(bin);
+        c.is_file() || c.with_extension("exe").is_file() || c.with_extension("cmd").is_file()
+    })
+}
+
+/// Is this agent installed? Either its CLI is reachable or it left a config dir.
+pub fn detect(agent: &Agent, home: &Path) -> bool {
+    agent.bins.iter().any(|b| on_path(b)) || agent.dirs.iter().any(|d| home.join(d).exists())
+}
+
+pub fn detected(home: &Path) -> Vec<&'static Agent> {
+    AGENTS.iter().filter(|a| detect(a, home)).collect()
+}
+
+/// One file modification, so `--dry-run` can describe the whole plan up front.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    pub agent: &'static str,
+    pub path: PathBuf,
+    pub what: What,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum What {
+    RegisterMcp,
+    UnregisterMcp,
+    WriteInstructions,
+    RemoveInstructions,
+    /// Autosave hooks written into an agent's settings.
+    WriteHooks,
+    RemoveHooks,
+    /// Nothing to do — already in the desired state.
+    AlreadyDone,
+    /// Format unverified; the snippet is printed for the user to paste.
+    ManualSnippet(String),
+}
+
+pub struct Options {
+    /// Absolute path to the binary agents should spawn.
+    pub command: String,
+    /// Patch user-level configs.
+    pub global: bool,
+    /// Patch the current project's configs.
+    pub project: Option<PathBuf>,
+    /// Restrict to these agent ids.
+    pub only: Option<Vec<String>>,
+    pub instructions: bool,
+    /// Wire the autosave hooks. Independent of the MCP registration: an agent can
+    /// have the tools without autosave, and vice versa.
+    pub hooks: bool,
+    pub dry_run: bool,
+}
+
+impl Options {
+    fn selected(&self, home: &Path) -> Vec<&'static Agent> {
+        detected(home)
+            .into_iter()
+            .filter(|a| match &self.only {
+                Some(ids) => ids.iter().any(|i| i == a.id),
+                None => true,
+            })
+            .collect()
+    }
+}
+
+/// Register (or, with `remove`, deregister) across every selected agent.
+pub fn apply(home: &Path, opts: &Options, remove: bool) -> Result<Vec<Change>> {
+    let mut changes = Vec::new();
+    for agent in opts.selected(home) {
+        if agent.format == Format::Manual {
+            if !remove {
+                changes.push(Change {
+                    agent: agent.id,
+                    path: PathBuf::from("(manual)"),
+                    what: What::ManualSnippet(snippet(agent, &opts.command)),
+                });
+            }
+            continue;
+        }
+
+        if opts.global {
+            if let Some(path) = pick_global(agent, home) {
+                changes.push(patch_mcp(agent, &path, opts, remove)?);
+            }
+        }
+        if let (Some(root), Some(rel)) = (&opts.project, agent.project_mcp) {
+            changes.push(patch_mcp(agent, &root.join(rel), opts, remove)?);
+        }
+    }
+
+    if opts.instructions {
+        for path in instruction_targets(home, opts) {
+            changes.push(patch_instructions(&path, opts.dry_run, remove)?);
+        }
+    }
+    changes.extend(apply_hooks(home, opts, remove)?);
+    Ok(changes)
+}
+
+/// The events autosave listens on, paired with the `fuckmemory hook` argument
+/// each one maps to.
+pub const HOOK_EVENTS: &[(&str, &str)] = &[
+    ("UserPromptSubmit", "prompt"),
+    ("SessionEnd", "session-end"),
+];
+
+/// Marks our entries in a settings file we share with the user's own hooks, so
+/// removal never touches a hook somebody else wrote.
+const HOOK_TAG: &str = "hook";
+
+pub fn hook_command(command: &str, agent: &str, event_arg: &str) -> String {
+    format!("{command} {HOOK_TAG} {event_arg} --agent {agent}")
+}
+
+/// Write (or remove) the autosave hooks for every selected agent that has a hook
+/// format we actually know.
+pub fn apply_hooks(home: &Path, opts: &Options, remove: bool) -> Result<Vec<Change>> {
+    let mut changes = Vec::new();
+    if !opts.hooks {
+        return Ok(changes);
+    }
+    for agent in opts.selected(home) {
+        let Some((rel, format)) = agent.hooks else {
+            continue;
+        };
+        let mut targets: Vec<PathBuf> = Vec::new();
+        if opts.global {
+            targets.push(home.join(rel));
+        }
+        if let (Some(root), Some(prel)) = (&opts.project, agent.project_hooks) {
+            targets.push(root.join(prel));
+        }
+        for path in targets {
+            let what = match format {
+                HookFormat::ClaudeSettings => {
+                    patch_claude_hooks(&path, &opts.command, agent.id, opts.dry_run, remove)?
+                }
+            };
+            changes.push(Change {
+                agent: agent.id,
+                path,
+                what,
+            });
+        }
+    }
+    Ok(changes)
+}
+
+/// Patch `hooks.<Event>[].hooks[]` in a Claude Code settings file.
+///
+/// The file belongs to the user and usually already has hooks in it, so this
+/// edits surgically: our command is identified by the `fuckmemory hook` prefix,
+/// entries that match are replaced or dropped, and every other hook — including
+/// other tools' entries in the same event — is left exactly as found.
+fn patch_claude_hooks(
+    path: &Path,
+    command: &str,
+    agent: &str,
+    dry_run: bool,
+    remove: bool,
+) -> Result<What> {
+    let (mut root, had_comments) = read_json(path)?;
+    if !root.is_object() {
+        anyhow::bail!(
+            "{} has a non-object top level; refusing to touch it",
+            path.display()
+        );
+    }
+    let mut changed = false;
+    for (event, arg) in HOOK_EVENTS {
+        // Identify our entry by the argument shape rather than by the binary
+        // name: people rename or relocate the binary, and matching on the path
+        // would then append a second copy on every install instead of updating
+        // the one that is already there.
+        let marker = format!(" {HOOK_TAG} {arg} --agent ");
+        let is_ours = |entry: &Value| -> bool {
+            entry
+                .get("command")
+                .and_then(Value::as_str)
+                .map(|c| c.contains(&marker))
+                .unwrap_or(false)
+        };
+        let desired = json!({
+            "type": "command",
+            "command": hook_command(command, agent, arg),
+            // Autosave must never hold up a prompt. If the store is locked by a
+            // long consolidation, we would rather drop one memory than stall the
+            // agent, so the timeout is short and deliberate.
+            "timeout": 10
+        });
+
+        if !root.get("hooks").map(Value::is_object).unwrap_or(false) {
+            if remove {
+                continue;
+            }
+            root["hooks"] = json!({});
+        }
+        if !root["hooks"]
+            .get(*event)
+            .map(Value::is_array)
+            .unwrap_or(false)
+        {
+            if remove {
+                continue;
+            }
+            root["hooks"][*event] = json!([]);
+        }
+        let groups = root["hooks"][*event].as_array_mut().unwrap();
+
+        // Find the group that already holds one of ours, if any.
+        let mut found = false;
+        for group in groups.iter_mut() {
+            let Some(list) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let before = list.len();
+            if remove {
+                list.retain(|e| !is_ours(e));
+                changed |= list.len() != before;
+            } else if let Some(slot) = list.iter_mut().find(|e| is_ours(e)) {
+                found = true;
+                if *slot != desired {
+                    *slot = desired.clone();
+                    changed = true;
+                }
+            }
+        }
+        if remove {
+            // Drop groups (and then the event) we emptied, so uninstall leaves no
+            // dangling scaffolding behind.
+            groups.retain(|g| {
+                g.get("hooks")
+                    .and_then(Value::as_array)
+                    .map(|l| !l.is_empty())
+                    .unwrap_or(true)
+            });
+            if groups.is_empty() {
+                root["hooks"].as_object_mut().unwrap().remove(*event);
+                changed = true;
+            }
+        } else if !found {
+            groups.push(json!({ "hooks": [desired] }));
+            changed = true;
+        }
+    }
+
+    if remove
+        && root
+            .get("hooks")
+            .and_then(Value::as_object)
+            .map(|h| h.is_empty())
+            .unwrap_or(false)
+    {
+        root.as_object_mut().unwrap().remove("hooks");
+    }
+    if !changed {
+        return Ok(What::AlreadyDone);
+    }
+    if had_comments {
+        eprintln!(
+            "fuckmemory: {} contained comments; they are not preserved (backup kept alongside)",
+            path.display()
+        );
+    }
+    if !dry_run {
+        backup(path, dry_run)?;
+        write_atomic(path, &format!("{}\n", serde_json::to_string_pretty(&root)?))?;
+    }
+    Ok(if remove {
+        What::RemoveHooks
+    } else {
+        What::WriteHooks
+    })
+}
+
+/// Prefer a config file that already exists; otherwise create the first candidate.
+fn pick_global(agent: &Agent, home: &Path) -> Option<PathBuf> {
+    let existing = agent
+        .global_mcp
+        .iter()
+        .map(|p| home.join(p))
+        .find(|p| p.exists());
+    existing.or_else(|| agent.global_mcp.first().map(|p| home.join(p)))
+}
+
+/// Instruction files to write, deduplicated — several agents share `AGENTS.md`.
+fn instruction_targets(home: &Path, opts: &Options) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for agent in opts.selected(home) {
+        if opts.global {
+            if let Some(rel) = agent.global_instructions {
+                out.push(home.join(rel));
+            }
+        }
+        if let Some(root) = &opts.project {
+            out.push(root.join(agent.project_instructions));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The server entry, in the shape a given agent wants.
+fn entry(format: Format, command: &str) -> Value {
+    match format {
+        Format::McpServers => json!({ "command": command, "args": ["serve"] }),
+        Format::VsCodeServers => {
+            json!({ "type": "stdio", "command": command, "args": ["serve"] })
+        }
+        Format::OpenCode => {
+            json!({ "type": "local", "command": [command, "serve"], "enabled": true })
+        }
+        Format::CodexToml | Format::Manual => json!({ "command": command, "args": ["serve"] }),
+    }
+}
+
+fn root_key(format: Format) -> &'static str {
+    match format {
+        Format::VsCodeServers => "servers",
+        Format::OpenCode => "mcp",
+        _ => "mcpServers",
+    }
+}
+
+/// A copy-pasteable snippet, for agents we won't write to automatically.
+pub fn snippet(agent: &Agent, command: &str) -> String {
+    let v = json!({ root_key(agent.format): { SERVER_NAME: entry(agent.format, command) } });
+    serde_json::to_string_pretty(&v).unwrap_or_default()
+}
+
+fn patch_mcp(agent: &Agent, path: &Path, opts: &Options, remove: bool) -> Result<Change> {
+    let what = if agent.format == Format::CodexToml {
+        patch_toml(path, &opts.command, opts.dry_run, remove)?
+    } else {
+        patch_json(path, agent.format, &opts.command, opts.dry_run, remove)?
+    };
+    Ok(Change {
+        agent: agent.id,
+        path: path.to_path_buf(),
+        what,
+    })
+}
+
+/// Read a JSON or JSONC file into a `Value`.
+///
+/// Returns `(value, had_comments)`. JSONC is accepted because real OpenCode and
+/// VS Code configs contain comments; we cannot preserve them through a
+/// serde round-trip, so the caller warns when any were dropped.
+fn read_json(path: &Path) -> Result<(Value, bool)> {
+    if !path.exists() {
+        return Ok((json!({}), false));
+    }
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    if text.trim().is_empty() {
+        return Ok((json!({}), false));
+    }
+    match serde_json::from_str::<Value>(&text) {
+        Ok(v) => Ok((v, false)),
+        Err(strict_err) => {
+            let parsed = jsonc_parser::parse_to_serde_value(&text, &Default::default())
+                .map_err(|e| anyhow::anyhow!("{} is not valid JSON or JSONC: {e}", path.display()))?
+                .ok_or_else(|| anyhow::anyhow!("{} parsed to nothing", path.display()))?;
+            let _ = strict_err;
+            Ok((parsed, true))
+        }
+    }
+}
+
+fn backup(path: &Path, dry_run: bool) -> Result<()> {
+    if dry_run || !path.exists() {
+        return Ok(());
+    }
+    let bak = path.with_extension(format!(
+        "{}.fuckmemory-{}.bak",
+        path.extension().and_then(|e| e.to_str()).unwrap_or("cfg"),
+        now()
+    ));
+    std::fs::copy(path, &bak).with_context(|| format!("backing up to {}", bak.display()))?;
+    Ok(())
+}
+
+/// Write via a temp file + rename, so a crash can't leave a half-written config.
+fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let tmp = path.with_extension(format!("fuckmemory-tmp-{}", std::process::id()));
+    std::fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
+fn patch_json(
+    path: &Path,
+    format: Format,
+    command: &str,
+    dry_run: bool,
+    remove: bool,
+) -> Result<What> {
+    let (mut root, had_comments) = read_json(path)?;
+    if !root.is_object() {
+        anyhow::bail!(
+            "{} has a non-object top level; refusing to touch it",
+            path.display()
+        );
+    }
+    let key = root_key(format);
+    let desired = entry(format, command);
+
+    if remove {
+        let existed = root.get(key).and_then(|m| m.get(SERVER_NAME)).is_some();
+        if !existed {
+            return Ok(What::AlreadyDone);
+        }
+        if let Some(map) = root.get_mut(key).and_then(Value::as_object_mut) {
+            map.remove(SERVER_NAME);
+        }
+    } else {
+        if root.get(key).and_then(|m| m.get(SERVER_NAME)) == Some(&desired) {
+            return Ok(What::AlreadyDone);
+        }
+        if !root.get(key).map(Value::is_object).unwrap_or(false) {
+            root[key] = json!({});
+        }
+        root[key][SERVER_NAME] = desired;
+    }
+
+    if had_comments {
+        eprintln!(
+            "fuckmemory: {} contained comments; they are not preserved (backup kept alongside)",
+            path.display()
+        );
+    }
+    if !dry_run {
+        backup(path, dry_run)?;
+        write_atomic(path, &format!("{}\n", serde_json::to_string_pretty(&root)?))?;
+    }
+    Ok(if remove {
+        What::UnregisterMcp
+    } else {
+        What::RegisterMcp
+    })
+}
+
+fn patch_toml(path: &Path, command: &str, dry_run: bool, remove: bool) -> Result<What> {
+    let text = if path.exists() {
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?
+    } else {
+        String::new()
+    };
+    // toml_edit keeps the user's comments and formatting intact, which matters
+    // for a hand-maintained file like ~/.codex/config.toml.
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("{} is not valid TOML", path.display()))?;
+
+    let present = doc
+        .get("mcp_servers")
+        .and_then(|t| t.as_table_like())
+        .map(|t| t.contains_key(SERVER_NAME))
+        .unwrap_or(false);
+
+    if remove {
+        if !present {
+            return Ok(What::AlreadyDone);
+        }
+        if let Some(t) = doc
+            .get_mut("mcp_servers")
+            .and_then(|t| t.as_table_like_mut())
+        {
+            t.remove(SERVER_NAME);
+        }
+    } else {
+        let already = present
+            && doc["mcp_servers"][SERVER_NAME]
+                .get("command")
+                .and_then(|v| v.as_str())
+                == Some(command);
+        if already {
+            return Ok(What::AlreadyDone);
+        }
+        if doc.get("mcp_servers").is_none() {
+            let mut t = toml_edit::Table::new();
+            t.set_implicit(true);
+            doc["mcp_servers"] = toml_edit::Item::Table(t);
+        }
+        let mut server = toml_edit::Table::new();
+        server["command"] = toml_edit::value(command);
+        let mut args = toml_edit::Array::new();
+        args.push("serve");
+        server["args"] = toml_edit::value(args);
+        doc["mcp_servers"][SERVER_NAME] = toml_edit::Item::Table(server);
+    }
+
+    if !dry_run {
+        backup(path, dry_run)?;
+        write_atomic(path, &doc.to_string())?;
+    }
+    Ok(if remove {
+        What::UnregisterMcp
+    } else {
+        What::RegisterMcp
+    })
+}
+
+/// Replace (or insert, or drop) our marked block in a markdown instruction file,
+/// leaving everything the user wrote untouched.
+pub fn splice_block(existing: &str, block: Option<&str>) -> String {
+    let body = block.map(|b| format!("{BEGIN}\n{b}\n{END}"));
+
+    if let (Some(s), Some(e)) = (existing.find(BEGIN), existing.find(END)) {
+        if s < e {
+            let head = &existing[..s];
+            let tail = &existing[e + END.len()..];
+            return match body {
+                Some(b) => format!("{head}{b}{tail}"),
+                None => {
+                    // Drop the block and the blank line it introduced.
+                    let joined = format!("{}{}", head.trim_end(), tail);
+                    let t = joined.trim();
+                    if t.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{t}\n")
+                    }
+                }
+            };
+        }
+    }
+
+    match body {
+        None => existing.to_string(),
+        Some(b) => {
+            if existing.trim().is_empty() {
+                format!("{b}\n")
+            } else {
+                format!("{}\n\n{b}\n", existing.trim_end())
+            }
+        }
+    }
+}
+
+fn patch_instructions(path: &Path, dry_run: bool, remove: bool) -> Result<Change> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let next = splice_block(&existing, if remove { None } else { Some(INSTRUCTIONS) });
+    let what = if next == existing {
+        What::AlreadyDone
+    } else if remove {
+        What::RemoveInstructions
+    } else {
+        What::WriteInstructions
+    };
+    if what != What::AlreadyDone && !dry_run {
+        backup(path, dry_run)?;
+        if next.is_empty() {
+            std::fs::remove_file(path).ok();
+        } else {
+            write_atomic(path, &next)?;
+        }
+    }
+    Ok(Change {
+        agent: "instructions",
+        path: path.to_path_buf(),
+        what,
+    })
+}
+
+/// Absolute path to the running binary, for embedding in configs. An absolute
+/// path is used rather than the bare name so registration doesn't silently break
+/// when an agent is launched with a different `PATH` (GUI apps often are).
+pub fn self_command() -> String {
+    std::env::current_exe()
+        .and_then(|p| p.canonicalize())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| SERVER_NAME.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("fm-inst-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&d).ok();
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn every_agent_has_a_usable_registration_route() {
+        for a in AGENTS {
+            assert!(!a.id.is_empty() && !a.name.is_empty());
+            let has_route =
+                !a.global_mcp.is_empty() || a.project_mcp.is_some() || a.format == Format::Manual;
+            assert!(has_route, "{} can never be registered", a.id);
+        }
+    }
+
+    #[test]
+    fn entry_shapes_match_each_tool() {
+        assert_eq!(entry(Format::McpServers, "fm")["args"][0], "serve");
+        assert_eq!(entry(Format::VsCodeServers, "fm")["type"], "stdio");
+        // OpenCode takes a single command array, not command + args.
+        let oc = entry(Format::OpenCode, "fm");
+        assert_eq!(oc["type"], "local");
+        assert_eq!(oc["command"][0], "fm");
+        assert_eq!(oc["command"][1], "serve");
+        assert_eq!(oc["enabled"], true);
+    }
+
+    #[test]
+    fn json_patch_creates_registers_and_is_idempotent() {
+        let d = tmpdir("json");
+        let p = d.join("mcp.json");
+        assert_eq!(
+            patch_json(&p, Format::McpServers, "/bin/fm", false, false).unwrap(),
+            What::RegisterMcp
+        );
+        let (v, _) = read_json(&p).unwrap();
+        assert_eq!(v["mcpServers"]["fuckmemory"]["command"], "/bin/fm");
+
+        assert_eq!(
+            patch_json(&p, Format::McpServers, "/bin/fm", false, false).unwrap(),
+            What::AlreadyDone,
+            "second run must be a no-op"
+        );
+    }
+
+    #[test]
+    fn json_patch_preserves_other_servers_and_keys() {
+        let d = tmpdir("keep");
+        let p = d.join("mcp.json");
+        std::fs::write(
+            &p,
+            r#"{"theme":"dark","mcpServers":{"other":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        patch_json(&p, Format::McpServers, "/bin/fm", false, false).unwrap();
+        let (v, _) = read_json(&p).unwrap();
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(v["mcpServers"]["other"]["command"], "x");
+        assert_eq!(v["mcpServers"]["fuckmemory"]["command"], "/bin/fm");
+    }
+
+    #[test]
+    fn json_patch_reads_jsonc_with_comments() {
+        let d = tmpdir("jsonc");
+        let p = d.join("opencode.jsonc");
+        std::fs::write(
+            &p,
+            "{\n  // my config\n  \"$schema\": \"https://opencode.ai/config.json\",\n}\n",
+        )
+        .unwrap();
+        patch_json(&p, Format::OpenCode, "/bin/fm", false, false).unwrap();
+        let (v, _) = read_json(&p).unwrap();
+        assert_eq!(v["$schema"], "https://opencode.ai/config.json");
+        assert_eq!(v["mcp"]["fuckmemory"]["type"], "local");
+    }
+
+    #[test]
+    fn json_patch_refuses_a_non_object_config() {
+        let d = tmpdir("bad");
+        let p = d.join("mcp.json");
+        std::fs::write(&p, "[1,2,3]").unwrap();
+        assert!(patch_json(&p, Format::McpServers, "/bin/fm", false, false).is_err());
+    }
+
+    #[test]
+    fn json_patch_makes_a_backup_before_writing() {
+        let d = tmpdir("backup");
+        let p = d.join("mcp.json");
+        std::fs::write(&p, r#"{"keep":1}"#).unwrap();
+        patch_json(&p, Format::McpServers, "/bin/fm", false, false).unwrap();
+        let baks: Vec<_> = std::fs::read_dir(&d)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("fuckmemory-"))
+            .collect();
+        assert_eq!(baks.len(), 1, "expected exactly one backup");
+    }
+
+    #[test]
+    fn dry_run_touches_nothing() {
+        let d = tmpdir("dry");
+        let p = d.join("mcp.json");
+        assert_eq!(
+            patch_json(&p, Format::McpServers, "/bin/fm", true, false).unwrap(),
+            What::RegisterMcp
+        );
+        assert!(!p.exists(), "dry run must not create files");
+    }
+
+    #[test]
+    fn unregister_removes_only_our_entry() {
+        let d = tmpdir("unreg");
+        let p = d.join("mcp.json");
+        std::fs::write(&p, r#"{"mcpServers":{"other":{"command":"x"}}}"#).unwrap();
+        patch_json(&p, Format::McpServers, "/bin/fm", false, false).unwrap();
+        assert_eq!(
+            patch_json(&p, Format::McpServers, "/bin/fm", false, true).unwrap(),
+            What::UnregisterMcp
+        );
+        let (v, _) = read_json(&p).unwrap();
+        assert!(v["mcpServers"].get("fuckmemory").is_none());
+        assert_eq!(v["mcpServers"]["other"]["command"], "x");
+        assert_eq!(
+            patch_json(&p, Format::McpServers, "/bin/fm", false, true).unwrap(),
+            What::AlreadyDone
+        );
+    }
+
+    #[test]
+    fn toml_patch_keeps_comments_and_existing_tables() {
+        let d = tmpdir("toml");
+        let p = d.join("config.toml");
+        std::fs::write(
+            &p,
+            "# my codex config\nmodel = \"gpt-5\"\n\n[mcp_servers.other]\ncommand = \"x\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            patch_toml(&p, "/bin/fm", false, false).unwrap(),
+            What::RegisterMcp
+        );
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert!(out.contains("# my codex config"), "comments lost:\n{out}");
+        assert!(out.contains("model = \"gpt-5\""));
+        assert!(out.contains("[mcp_servers.other]"));
+        assert!(out.contains("[mcp_servers.fuckmemory]"), "got:\n{out}");
+        assert!(out.contains("args = [\"serve\"]"), "got:\n{out}");
+
+        assert_eq!(
+            patch_toml(&p, "/bin/fm", false, false).unwrap(),
+            What::AlreadyDone
+        );
+        assert_eq!(
+            patch_toml(&p, "/bin/fm", false, true).unwrap(),
+            What::UnregisterMcp
+        );
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("fuckmemory"));
+    }
+
+    #[test]
+    fn toml_patch_rejects_broken_toml() {
+        let d = tmpdir("badtoml");
+        let p = d.join("config.toml");
+        std::fs::write(&p, "this is [not toml").unwrap();
+        assert!(patch_toml(&p, "/bin/fm", false, false).is_err());
+    }
+
+    #[test]
+    fn splice_inserts_after_user_content() {
+        let out = splice_block("# My project\n\nSome rules.\n", Some(INSTRUCTIONS));
+        assert!(out.starts_with("# My project"));
+        assert!(out.contains(BEGIN) && out.contains(END));
+        assert!(out.contains("Persistent memory"));
+    }
+
+    #[test]
+    fn splice_replaces_in_place_without_duplicating() {
+        let first = splice_block("# Doc\n", Some(INSTRUCTIONS));
+        let second = splice_block(&first, Some("NEW BODY"));
+        assert_eq!(second.matches(BEGIN).count(), 1);
+        assert!(second.contains("NEW BODY"));
+        assert!(!second.contains("Persistent memory"));
+        assert!(
+            second.starts_with("# Doc"),
+            "user content preserved: {second:?}"
+        );
+    }
+
+    #[test]
+    fn splice_removes_block_and_leaves_user_content() {
+        let with = splice_block("# Doc\n\nrules\n", Some(INSTRUCTIONS));
+        let without = splice_block(&with, None);
+        assert!(!without.contains(BEGIN));
+        assert!(without.contains("# Doc"));
+        assert!(without.contains("rules"));
+    }
+
+    #[test]
+    fn splice_removal_of_our_only_content_yields_empty() {
+        let only = splice_block("", Some(INSTRUCTIONS));
+        assert!(splice_block(&only, None).is_empty());
+    }
+
+    #[test]
+    fn splice_ignores_reversed_markers() {
+        // Malformed input must not corrupt the file; append instead.
+        let weird = format!("{END} stray {BEGIN}");
+        let out = splice_block(&weird, Some("BODY"));
+        assert!(out.contains("stray"));
+        assert!(out.contains("BODY"));
+    }
+
+    #[test]
+    fn instruction_targets_dedupe_shared_agents_md() {
+        let home = tmpdir("targets");
+        let proj = tmpdir("targets-proj");
+        // Make several AGENTS.md-reading agents look installed.
+        for d in [".codex", ".gemini", ".qwen"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        let opts = Options {
+            command: "fm".into(),
+            global: false,
+            project: Some(proj.clone()),
+            only: Some(vec!["codex".into(), "gemini-cli".into(), "qwen".into()]),
+            instructions: true,
+            hooks: false,
+            dry_run: true,
+        };
+        let t = instruction_targets(&home, &opts);
+        assert_eq!(t, vec![proj.join("AGENTS.md")], "got {t:?}");
+    }
+
+    #[test]
+    fn apply_end_to_end_is_idempotent_and_reversible() {
+        let home = tmpdir("e2e-home");
+        let proj = tmpdir("e2e-proj");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+
+        let opts = Options {
+            command: "/bin/fm".into(),
+            global: true,
+            project: Some(proj.clone()),
+            only: Some(vec!["codex".into(), "cursor".into()]),
+            instructions: true,
+            hooks: false,
+            dry_run: false,
+        };
+
+        let first = apply(&home, &opts, false).unwrap();
+        assert!(first.iter().any(|c| c.what == What::RegisterMcp));
+        assert!(home.join(".codex/config.toml").exists());
+        assert!(home.join(".cursor/mcp.json").exists());
+        assert!(proj.join("AGENTS.md").exists());
+
+        let second = apply(&home, &opts, false).unwrap();
+        assert!(
+            second.iter().all(|c| c.what == What::AlreadyDone),
+            "re-install should change nothing: {second:?}"
+        );
+
+        let undo = apply(&home, &opts, true).unwrap();
+        assert!(undo
+            .iter()
+            .any(|c| matches!(c.what, What::UnregisterMcp | What::RemoveInstructions)));
+        let toml = std::fs::read_to_string(home.join(".codex/config.toml")).unwrap();
+        assert!(!toml.contains("fuckmemory"));
+    }
+
+    #[test]
+    fn detection_finds_agents_by_config_dir() {
+        let home = tmpdir("detect");
+        assert!(detected(&home).iter().all(|a| !a.bins.is_empty()));
+        std::fs::create_dir_all(home.join(".qwen")).unwrap();
+        assert!(detected(&home).iter().any(|a| a.id == "qwen"));
+    }
+
+    /// Options that wire hooks for Claude Code against a throwaway home.
+    fn hook_opts(dry_run: bool) -> Options {
+        Options {
+            command: "/bin/fm".into(),
+            global: true,
+            project: None,
+            only: Some(vec!["claude-code".into()]),
+            instructions: false,
+            hooks: true,
+            dry_run,
+        }
+    }
+
+    #[test]
+    fn hooks_are_written_idempotently_and_removed_cleanly() {
+        let home = tmpdir("hooks");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let path = home.join(".claude/settings.json");
+
+        let first = apply_hooks(&home, &hook_opts(false), false).unwrap();
+        assert!(first.iter().any(|c| c.what == What::WriteHooks));
+        let text = std::fs::read_to_string(&path).unwrap();
+        for (event, arg) in HOOK_EVENTS {
+            assert!(text.contains(event), "missing {event}: {text}");
+            assert!(
+                text.contains(&format!("hook {arg} --agent claude-code")),
+                "{text}"
+            );
+        }
+
+        let again = apply_hooks(&home, &hook_opts(false), false).unwrap();
+        assert!(
+            again.iter().all(|c| c.what == What::AlreadyDone),
+            "second run should be a no-op: {again:?}"
+        );
+
+        let undo = apply_hooks(&home, &hook_opts(false), true).unwrap();
+        assert!(undo.iter().any(|c| c.what == What::RemoveHooks));
+        let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            after.get("hooks").is_none(),
+            "an emptied hooks block should be dropped: {after}"
+        );
+    }
+
+    /// The settings file belongs to the user. Their hooks, and their other
+    /// settings, must survive both the install and the uninstall untouched.
+    #[test]
+    fn other_peoples_hooks_are_never_disturbed() {
+        let home = tmpdir("hooks-coexist");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let path = home.join(".claude/settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "model": "opus",
+              "hooks": {
+                "UserPromptSubmit": [
+                  {"hooks": [{"type": "command", "command": "their-logger --quiet"}]}
+                ],
+                "PreToolUse": [
+                  {"matcher": "Bash", "hooks": [{"type": "command", "command": "their-guard"}]}
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        apply_hooks(&home, &hook_opts(false), false).unwrap();
+        let mid = std::fs::read_to_string(&path).unwrap();
+        assert!(mid.contains("their-logger --quiet"));
+        assert!(mid.contains("their-guard"));
+        assert!(mid.contains("\"model\": \"opus\""));
+
+        apply_hooks(&home, &hook_opts(false), true).unwrap();
+        let end: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(end["model"], "opus");
+        assert_eq!(
+            end["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+            "their-logger --quiet"
+        );
+        assert_eq!(
+            end["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "their-guard"
+        );
+        let text = serde_json::to_string(&end).unwrap();
+        assert!(
+            !text.contains(SERVER_NAME),
+            "our hook should be gone: {text}"
+        );
+    }
+
+    #[test]
+    fn a_changed_binary_path_updates_the_existing_hook_instead_of_duplicating_it() {
+        let home = tmpdir("hooks-move");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        apply_hooks(&home, &hook_opts(false), false).unwrap();
+
+        let mut moved = hook_opts(false);
+        moved.command = "/usr/local/bin/fm".into();
+        apply_hooks(&home, &moved, false).unwrap();
+
+        let v: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        let groups = v["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "the old entry should have been rewritten");
+        assert!(groups[0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("/usr/local/bin/fm"));
+    }
+
+    #[test]
+    fn dry_run_hooks_write_nothing() {
+        let home = tmpdir("hooks-dry");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        let changes = apply_hooks(&home, &hook_opts(true), false).unwrap();
+        assert!(changes.iter().any(|c| c.what == What::WriteHooks));
+        assert!(!home.join(".claude/settings.json").exists());
+    }
+
+    #[test]
+    fn agents_without_a_known_hook_format_are_left_alone() {
+        let home = tmpdir("hooks-unknown");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let mut opts = hook_opts(false);
+        opts.only = Some(vec!["codex".into()]);
+        assert!(apply_hooks(&home, &opts, false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn manual_agents_get_a_snippet_not_a_write() {
+        let home = tmpdir("manual");
+        std::fs::create_dir_all(home.join(".kimi-code")).unwrap();
+        let opts = Options {
+            command: "/bin/fm".into(),
+            global: true,
+            project: None,
+            only: Some(vec!["kimi-code".into()]),
+            instructions: false,
+            hooks: false,
+            dry_run: false,
+        };
+        let ch = apply(&home, &opts, false).unwrap();
+        assert_eq!(ch.len(), 1);
+        assert!(matches!(ch[0].what, What::ManualSnippet(_)));
+    }
+}

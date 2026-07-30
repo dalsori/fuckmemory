@@ -1,0 +1,4 @@
+/target
+*.bak
+*.fuckmemory-*.bak
+backup.sh

@@ -1,6 +1,6 @@
 # fuckmemory
 
-[![CI](https://github.com/clainev/fuckmemory/actions/workflows/ci.yml/badge.svg)](https://github.com/clainev/fuckmemory/actions/workflows/ci.yml)
+[![CI](https://github.com/dalsori/fuckmemory/actions/workflows/ci.yml/badge.svg)](https://github.com/dalsori/fuckmemory/actions/workflows/ci.yml)
 
 One local memory, shared by every AI coding agent you use.
 
@@ -73,7 +73,7 @@ Graphiti model, without Neo4j.
 Needs Rust 1.85+ (`rustup` from https://rustup.rs).
 
 ```bash
-git clone https://github.com/clainev/fuckmemory && cd fuckmemory
+git clone https://github.com/dalsori/fuckmemory && cd fuckmemory
 ./install.sh
 ```
 

@@ -1,5 +1,7 @@
 # fuckmemory
 
+[![CI](https://github.com/clainev/fuckmemory/actions/workflows/ci.yml/badge.svg)](https://github.com/clainev/fuckmemory/actions/workflows/ci.yml)
+
 One local memory, shared by every AI coding agent you use.
 
 Your agents forget everything between sessions, and they each forget separately.

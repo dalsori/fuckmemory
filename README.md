@@ -453,6 +453,11 @@ Layout:
 | `mcp.rs` | stdio JSON-RPC server |
 | `install.rs` | agent detection and config patching |
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the [changelog](CHANGELOG.md). Report
+vulnerabilities via [SECURITY.md](SECURITY.md) — not in public issues.
+
 ## License
 
 MIT

@@ -37,6 +37,29 @@ $ fuckmemory install --autosave
 autosave  on — every prompt is stored, memories are injected back
 ```
 
+## What's new in v1.1.1
+
+- **Memory shared between agents, automatically.** One `fuckmemory install`
+  wires every agent on the machine to the *same* store. Claude Code remembers
+  something on Monday; OpenCode and Codex recall it on Tuesday. No per-agent
+  setup, no manual MCP configuration, one temporary graph on your disk.
+- **It does not depend on the model's discipline.** With `--autosave` the store
+  is involuntary: every prompt is kept and relevant memories are fed back into
+  every prompt, whether or not the agent thought to call a tool.
+- **Instant writes.** No LLM runs in the write path — a `remember` is an INSERT
+  plus a static embedding, one round trip averaging **~5 ms** per prompt even
+  under autosave.
+- **Fused retrieval that stays in budget.** BM25 + embeddings + graph votes are
+  ranked by Reciprocal Rank Fusion, deduped by MMR, and hard-capped at a token
+  budget, so recall never floods a context window.
+- **Time travel.** Every fact has two time axes; `--as-of` answers what you
+  believed on any past date even after the fact was overwritten.
+- **The details that keep it fast**: an mmap'd f16 embedding cache (≈1 ms cold
+  start, verified to cosine 0.999999 against the reference model) and a `tui`
+  for settings, agents and memories.
+- **Owned by you.** One database, one model, one config directory; `uninstall`
+  reverses every byte `install` wrote.
+
 ## Why another one
 
 | | Mem0 | Zep / Graphiti | typical MCP memory servers | fuckmemory |
@@ -332,8 +355,6 @@ fuckmemory remember --scope global "no emoji in commit messages, ever"
 
 ### Configuration
 
-| Variable | Default | Meaning |
-|---|---|---|
 Settings live in `$FUCKMEMORY_HOME/config.toml`, written by `fuckmemory tui` and
 safe to edit by hand. Environment variables override it, so a variable set for
 one shell always wins:

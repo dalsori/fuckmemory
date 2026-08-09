@@ -400,10 +400,8 @@ const EVENTS_PASCAL: &[(&str, &str)] = &[
 
 /// Gemini CLI's equivalents. `BeforeAgent` fires after a prompt is submitted but
 /// before planning, which is exactly where autosave and recall want to run.
-const HOOK_EVENTS_GEMINI: &[(&str, &str)] = &[
-    ("BeforeAgent", "prompt"),
-    ("SessionEnd", "session-end"),
-];
+const HOOK_EVENTS_GEMINI: &[(&str, &str)] =
+    &[("BeforeAgent", "prompt"), ("SessionEnd", "session-end")];
 
 /// Cursor spells its events in camelCase.
 const HOOK_EVENTS_CURSOR: &[(&str, &str)] = &[
@@ -510,7 +508,11 @@ fn patch_grouped(
             .and_then(Value::as_bool)
             .unwrap_or(false);
         if !on {
-            if !root.get("hooksConfig").map(Value::is_object).unwrap_or(false) {
+            if !root
+                .get("hooksConfig")
+                .map(Value::is_object)
+                .unwrap_or(false)
+            {
                 root["hooksConfig"] = json!({});
             }
             root["hooksConfig"]["enabled"] = json!(true);
@@ -649,7 +651,10 @@ fn patch_flat(
     let mut changed = false;
 
     if matches!(format, HookFormat::Copilot | HookFormat::Cursor)
-        && !root.get("version").and_then(Value::as_u64).is_some_and(|v| v == 1)
+        && !root
+            .get("version")
+            .and_then(Value::as_u64)
+            .is_some_and(|v| v == 1)
     {
         if remove {
             return Ok(What::AlreadyDone);
@@ -1563,9 +1568,10 @@ mod tests {
         };
 
         apply_hooks(&home, &base, false).unwrap();
-        let v: Value =
-            serde_json::from_str(&std::fs::read_to_string(home.join(".gemini/settings.json")).unwrap())
-                .unwrap();
+        let v: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".gemini/settings.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             v["hooksConfig"]["enabled"], true,
             "hooksConfig.enabled must be on"
@@ -1609,9 +1615,10 @@ mod tests {
         };
 
         apply_hooks(&home, &base, false).unwrap();
-        let v: Value =
-            serde_json::from_str(&std::fs::read_to_string(home.join(".cursor/hooks.json")).unwrap())
-                .unwrap();
+        let v: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".cursor/hooks.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(v["version"], 1);
         assert!(v["hooks"].get("beforeSubmitPrompt").is_some());
         assert!(v["hooks"].get("sessionEnd").is_some());
@@ -1619,13 +1626,14 @@ mod tests {
         assert_eq!(entry["timeout"], 10);
         assert!(entry.get("type").is_none(), "cursor needs no type field");
         assert!(
-            entry["command"].as_str().unwrap().contains("hook prompt --agent cursor"),
+            entry["command"]
+                .as_str()
+                .unwrap()
+                .contains("hook prompt --agent cursor"),
             "got {entry}"
         );
         assert!(
-            v["hooks"]["beforeSubmitPrompt"][0]
-                .get("hooks")
-                .is_none(),
+            v["hooks"]["beforeSubmitPrompt"][0].get("hooks").is_none(),
             "must stay flat, not nested: {v}"
         );
 
@@ -1695,7 +1703,11 @@ mod tests {
             command: "/bin/fm".into(),
             global: true,
             project: Some(proj.clone()),
-            only: Some(vec!["gemini-cli".into(), "cursor".into(), "copilot-cli".into()]),
+            only: Some(vec![
+                "gemini-cli".into(),
+                "cursor".into(),
+                "copilot-cli".into(),
+            ]),
             instructions: false,
             hooks: true,
             dry_run: false,

@@ -100,9 +100,20 @@ git clone https://github.com/dalsori/fuckmemory && cd fuckmemory
 ./install.sh
 ```
 
-Or grab a prebuilt binary from the
+Or grab a prebuilt binary for your platform from the
 [releases](https://github.com/dalsori/fuckmemory/releases) (no Rust toolchain
-needed), then run `fuckmemory install` to wire your agents.
+needed). Assets are named `fuckmemory-<target>.tar.gz` (Unix) or
+`fuckmemory-<target>.zip` (Windows):
+
+| Target | When |
+|---|---|
+| `x86_64-unknown-linux-gnu` | Linux x86_64 |
+| `aarch64-unknown-linux-gnu` | Linux ARM64, e.g. Raspberry Pi |
+| `x86_64-apple-darwin` | Intel Macs |
+| `aarch64-apple-darwin` | Apple Silicon Macs |
+| `x86_64-pc-windows-msvc` | Windows x86_64 |
+
+Then run `fuckmemory install` to wire your agents.
 
 Or manually:
 
@@ -136,21 +147,47 @@ git pull
 
 Or pull just the newest binary from a release:
 
+**Linux / macOS:**
+
 ```bash
 ver=1.1.1                                        # or whatever is latest
-curl -L -o /tmp/fuckmemory.gz \
-  https://github.com/dalsori/fuckmemory/releases/download/v$ver/fuckmemory-linux-x86_64.gz
-gunzip -f /tmp/fuckmemory.gz && chmod +x /tmp/fuckmemory
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64)              target=x86_64-unknown-linux-gnu ;;
+  Linux-aarch64|Linux-arm64) target=aarch64-unknown-linux-gnu ;;
+  Darwin-x86_64)             target=x86_64-apple-darwin ;;
+  Darwin-arm64)              target=aarch64-apple-darwin ;;
+esac
+curl -L -o /tmp/fuckmemory.tar.gz \
+  https://github.com/dalsori/fuckmemory/releases/download/v$ver/fuckmemory-$target.tar.gz
+tar -xzf /tmp/fuckmemory.tar.gz -C /tmp
 install -m 755 /tmp/fuckmemory ~/.local/bin/fuckmemory
+```
 
-# your agents still point at the old path/command; this rewrites the configs to
-# the fresh binary and picks up any new hooks. Idempotent, edits nothing of yours.
-fuckmemory install --command ~/.local/bin/fuckmemory --autosave
+**Windows (PowerShell):**
+
+```powershell
+$ver = "1.1.1"   # or whatever is latest
+$target = "x86_64-pc-windows-msvc"
+Invoke-WebRequest `
+  "https://github.com/dalsori/fuckmemory/releases/download/v$ver/fuckmemory-$target.zip" `
+  -OutFile "$env:TEMP\fuckmemory.zip"
+Expand-Archive "$env:TEMP\fuckmemory.zip" "$env:TEMP\fuckmemory" -Force
+# put fuckmemory.exe on your PATH, or reference it directly below
+```
+
+Then point your agents at the fresh binary — this rewrites the configs, is
+idempotent, and edits nothing of yours:
+
+```bash
+fuckmemory install --command "$(which fuckmemory)" --autosave
+# Windows: fuckmemory install --command "$env:LOCALAPPDATA\fuckmemory\fuckmemory.exe" --autosave
 ```
 
 For `cargo install` users: `cargo install --path . --force` in the repo.
 
-Check what moved between versions in the [CHANGELOG](CHANGELOG.md).
+Releases are built automatically in CI for every target in the table above, so
+`curl`/`Invoke-WebRequest` never gets a 404. Check what moved between versions
+in the [CHANGELOG](CHANGELOG.md).
 
 ### What gets written where
 

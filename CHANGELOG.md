@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Multi-platform release builds.** GitHub Actions now builds prebuilt binaries
+  for Linux (x86_64 and arm64), macOS (Intel and Apple Silicon) and Windows, and
+  attaches them to every published release as `fuckmemory-<target>.tar.gz`/`.zip`.
+  The README documents how to upgrade on each OS.
+
 ## [1.1.1] - 2026-08-09
 
 ### Added

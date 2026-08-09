@@ -63,8 +63,13 @@ pub enum Format {
 /// schema would silently do nothing (or worse, break the agent's startup).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookFormat {
-    /// Claude Code's `settings.json`: `hooks.<Event>[].hooks[] = {type, command}`.
-    ClaudeSettings,
+    /// Anthropic's three-level shape: `hooks.<Event>[].hooks[] = {type, command}`.
+    /// Claude Code and Codex use `timeout` in **seconds**; Qwen Code in
+    /// **milliseconds**. All three are the same JSON structure, so one patcher
+    /// serves them; only the timeout unit differs.
+    Anthropic,
+    /// Qwen Code's JSONC settings file, same shape as Anthropic, timeout in ms.
+    QwenSettings,
 }
 
 pub struct Agent {
@@ -104,7 +109,7 @@ pub const AGENTS: &[Agent] = &[
         // Claude Code reads CLAUDE.md natively and AGENTS.md only via import.
         project_instructions: "CLAUDE.md",
         global_instructions: Some(".claude/CLAUDE.md"),
-        hooks: Some((".claude/settings.json", HookFormat::ClaudeSettings)),
+        hooks: Some((".claude/settings.json", HookFormat::Anthropic)),
         project_hooks: Some(".claude/settings.json"),
     },
     Agent {
@@ -117,8 +122,10 @@ pub const AGENTS: &[Agent] = &[
         format: Format::CodexToml,
         project_instructions: "AGENTS.md",
         global_instructions: Some(".codex/AGENTS.md"),
-        hooks: None,
-        project_hooks: None,
+        // Codex reads hooks from `~/.codex/hooks.json` (or inline in
+        // config.toml); the JSON file keeps us away from the TOML parser.
+        hooks: Some((".codex/hooks.json", HookFormat::Anthropic)),
+        project_hooks: Some(".codex/hooks.json"),
     },
     Agent {
         id: "gemini-cli",
@@ -172,8 +179,8 @@ pub const AGENTS: &[Agent] = &[
         format: Format::McpServers,
         project_instructions: "AGENTS.md",
         global_instructions: Some(".qwen/QWEN.md"),
-        hooks: None,
-        project_hooks: None,
+        hooks: Some((".qwen/settings.json", HookFormat::QwenSettings)),
+        project_hooks: Some(".qwen/settings.json"),
     },
     Agent {
         id: "cursor",
@@ -293,6 +300,19 @@ pub struct Options {
     pub dry_run: bool,
 }
 
+impl HookFormat {
+    /// The `timeout` to write into each hook entry. Claude Code and Codex
+    /// measure it in seconds; Qwen Code in milliseconds. Same intent either way
+    /// (~10s): autosave must never hold a prompt, so if the store is locked by a
+    /// long consolidation we'd rather drop one memory than stall the agent.
+    fn timeout(&self) -> i64 {
+        match self {
+            HookFormat::Anthropic => 10,
+            HookFormat::QwenSettings => 10_000,
+        }
+    }
+}
+
 impl Options {
     fn selected(&self, home: &Path) -> Vec<&'static Agent> {
         detected(home)
@@ -373,11 +393,7 @@ pub fn apply_hooks(home: &Path, opts: &Options, remove: bool) -> Result<Vec<Chan
             targets.push(root.join(prel));
         }
         for path in targets {
-            let what = match format {
-                HookFormat::ClaudeSettings => {
-                    patch_claude_hooks(&path, &opts.command, agent.id, opts.dry_run, remove)?
-                }
-            };
+            let what = patch_hooks(&path, &opts.command, agent.id, format, opts.dry_run, remove)?;
             changes.push(Change {
                 agent: agent.id,
                 path,
@@ -388,16 +404,19 @@ pub fn apply_hooks(home: &Path, opts: &Options, remove: bool) -> Result<Vec<Chan
     Ok(changes)
 }
 
-/// Patch `hooks.<Event>[].hooks[]` in a Claude Code settings file.
+/// Patch `hooks.<Event>[].hooks[]` in an Anthropic-style settings file — Claude
+/// Code `settings.json`, Codex `hooks.json`, Qwen `settings.json`. The shape is
+/// identical across all three; only the timeout unit differs.
 ///
 /// The file belongs to the user and usually already has hooks in it, so this
 /// edits surgically: our command is identified by the `fuckmemory hook` prefix,
 /// entries that match are replaced or dropped, and every other hook — including
 /// other tools' entries in the same event — is left exactly as found.
-fn patch_claude_hooks(
+fn patch_hooks(
     path: &Path,
     command: &str,
     agent: &str,
+    format: HookFormat,
     dry_run: bool,
     remove: bool,
 ) -> Result<What> {
@@ -428,7 +447,7 @@ fn patch_claude_hooks(
             // Autosave must never hold up a prompt. If the store is locked by a
             // long consolidation, we would rather drop one memory than stall the
             // agent, so the timeout is short and deliberate.
-            "timeout": 10
+            "timeout": format.timeout()
         });
 
         if !root.get("hooks").map(Value::is_object).unwrap_or(false) {
@@ -1230,10 +1249,74 @@ mod tests {
     #[test]
     fn agents_without_a_known_hook_format_are_left_alone() {
         let home = tmpdir("hooks-unknown");
-        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
         let mut opts = hook_opts(false);
-        opts.only = Some(vec!["codex".into()]);
+        opts.only = Some(vec!["cursor".into()]);
         assert!(apply_hooks(&home, &opts, false).unwrap().is_empty());
+    }
+
+    /// Codex and Qwen use the same Anthropic JSON shape but different files and
+    /// timeouts (seconds vs milliseconds). Both must be written and removed
+    /// exactly like Claude's, idempotently, without clobbering existing keys.
+    #[test]
+    fn codex_and_qwen_hooks_are_written_and_removed() {
+        let home = tmpdir("hooks-codex-qwen");
+        for sub in [".codex", ".qwen"] {
+            std::fs::create_dir_all(home.join(sub)).unwrap();
+        }
+
+        let base = Options {
+            command: "/bin/fm".into(),
+            global: true,
+            project: None,
+            only: None,
+            instructions: false,
+            hooks: true,
+            dry_run: false,
+        };
+
+        let first = apply_hooks(&home, &base, false).unwrap();
+        assert!(first.iter().any(|c| c.what == What::WriteHooks));
+        assert!(
+            first.len() >= 2,
+            "claude, codex and qwen all wired: {first:?}"
+        );
+
+        let codex: Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            codex["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"], 10,
+            "codex measures timeout in seconds"
+        );
+
+        let qwen: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".qwen/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            qwen["hooks"]["UserPromptSubmit"][0]["hooks"][0]["timeout"], 10_000,
+            "qwen measures timeout in milliseconds"
+        );
+        assert!(qwen["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("--agent qwen"));
+
+        let again = apply_hooks(&home, &base, false).unwrap();
+        assert!(
+            again.iter().all(|c| c.what == What::AlreadyDone),
+            "second run should be a no-op: {again:?}"
+        );
+
+        let undo = apply_hooks(&home, &base, true).unwrap();
+        assert!(undo.iter().any(|c| c.what == What::RemoveHooks));
+        assert!(
+            !std::fs::read_to_string(home.join(".qwen/settings.json"))
+                .unwrap()
+                .contains("hooks"),
+            "emptied qwen hooks block should be dropped"
+        );
     }
 
     #[test]

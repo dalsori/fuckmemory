@@ -120,25 +120,25 @@ reverses it. Add `--dry-run` to see the plan first.
 the instruction file that tells the agent *when* to call the tools. Without the
 second one the tools exist and nothing ever calls them.
 
-| Agent | MCP config | Instructions |
-|---|---|---|
-| Claude Code | `~/.claude.json`, `./.mcp.json` | `CLAUDE.md` |
-| OpenAI Codex CLI | `~/.codex/config.toml` | `AGENTS.md` |
-| Gemini CLI | `~/.gemini/settings.json` | `AGENTS.md` |
-| Antigravity CLI | `~/.gemini/config/mcp_config.json`, `./.agents/mcp_config.json` | `AGENTS.md` |
-| OpenCode | `~/.config/opencode/opencode.json[c]` | `AGENTS.md` |
-| Qwen Code | `~/.qwen/settings.json` | `AGENTS.md` |
-| Cursor | `~/.cursor/mcp.json` | `AGENTS.md` |
-| GitHub Copilot CLI | `~/.copilot/mcp-config.json` | `AGENTS.md` |
-| VS Code | `./.vscode/mcp.json` | `AGENTS.md` |
-| Kimi Code | prints a snippet — format unverified | `AGENTS.md` |
+| Agent | MCP config | Instructions | Autosave hooks |
+|---|---|---|---|
+| Claude Code | `~/.claude.json`, `./.mcp.json` | `CLAUDE.md` | `./.claude/settings.json` |
+| OpenAI Codex CLI | `~/.codex/config.toml` | `AGENTS.md` | `./.codex/hooks.json` |
+| Gemini CLI | `~/.gemini/settings.json` | `AGENTS.md` | — |
+| Antigravity CLI | `~/.gemini/config/mcp_config.json`, `./.agents/mcp_config.json` | `AGENTS.md` | — |
+| OpenCode | `~/.config/opencode/opencode.json[c]` | `AGENTS.md` | — |
+| Qwen Code | `~/.qwen/settings.json` | `AGENTS.md` | `./.qwen/settings.json` |
+| Cursor | `~/.cursor/mcp.json` | `AGENTS.md` | — |
+| GitHub Copilot CLI | `~/.copilot/mcp-config.json` | `AGENTS.md` | — |
+| VS Code | `./.vscode/mcp.json` | `AGENTS.md` | — |
+| Kimi Code | prints a snippet — format unverified | `AGENTS.md` | — |
 
 The instruction block lives between `<!-- fuckmemory:begin -->` and
 `<!-- fuckmemory:end -->` markers, so re-running `install` replaces it in place
 and never duplicates or clobbers what you wrote around it.
 
-With `--autosave`, it also writes hooks into the agents that support them (Claude
-Code today) — see below.
+With `--autosave`, it also writes hooks into the agents that support them
+(Claude Code, OpenAI Codex CLI, Qwen Code) — see below.
 
 Everything the tool writes lives in one directory you can delete:
 `~/.local/share/fuckmemory` (override with `FUCKMEMORY_HOME`).
@@ -150,7 +150,11 @@ fuckmemory install --autosave     # or toggle it in `fuckmemory tui`
 ```
 
 This wires `fuckmemory hook prompt` into the agent's `UserPromptSubmit` hook, so
-every prompt goes through the store on its way to the model:
+every prompt goes through the store on its way to the model. The hook format is
+the Anthropic JSON shape used by Claude Code (`settings.json`), Codex
+(`hooks.json`) and Qwen Code (`settings.json`); only the `timeout` unit differs
+(seconds for the first two, milliseconds for Qwen). Agents without a verified
+hook format are left alone rather than guessed at.
 
 - **Every prompt is kept**, verbatim, as a searchable episode. Nothing is lost.
 - **Only prompts that read like durable knowledge become facts.** "never force
@@ -198,9 +202,9 @@ fuckmemory tui
 │   auto-recall      on             │└────────────────────────────────┘
 │     memories       6              │┌ agents ────────────────────────┐
 │     token budget   600 tokens     ││claude-code  tools ✓ autosave ✓ │
-│   semantic search  on             ││opencode     tools ✓ autosave — │
-│   fast embed cache on             ││codex        tools ✓ autosave — │
-│   recall budget    1200 tokens    ││                                │
+│   semantic search  on             ││codex        tools ✓ autosave ✓ │
+│   fast embed cache on             ││qwen         tools ✓ autosave ✓ │
+│   recall budget    1200 tokens    ││opencode     tools ✓ autosave — │
 └───────────────────────────────────┘└────────────────────────────────┘
  ↑↓ move · space toggle · ←→ adjust · s save · r rebuild cache · q quit
 ```

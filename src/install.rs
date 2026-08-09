@@ -70,6 +70,16 @@ pub enum HookFormat {
     Anthropic,
     /// Qwen Code's JSONC settings file, same shape as Anthropic, timeout in ms.
     QwenSettings,
+    /// Gemini CLI's settings.json: same three-level shape as Anthropic, timeout
+    /// in ms, and the `hooksConfig.enabled` toggle that gates the whole system.
+    GeminiSettings,
+    /// Cursor's `hooks.json`: a flat `{version, hooks: {<event>: [{command}]}}`
+    /// map — one array per event, no group wrapper, no `type` field. The command
+    /// is a shell string.
+    Cursor,
+    /// GitHub Copilot CLI's `hooks/*.json`: flat, events in camelCase, and each
+    /// entry carries `bash`/`powershell` keys instead of `command`.
+    Copilot,
 }
 
 pub struct Agent {
@@ -137,8 +147,8 @@ pub const AGENTS: &[Agent] = &[
         format: Format::McpServers,
         project_instructions: "AGENTS.md",
         global_instructions: Some(".gemini/GEMINI.md"),
-        hooks: None,
-        project_hooks: None,
+        hooks: Some((".gemini/settings.json", HookFormat::GeminiSettings)),
+        project_hooks: Some(".gemini/settings.json"),
     },
     Agent {
         id: "antigravity",
@@ -192,8 +202,8 @@ pub const AGENTS: &[Agent] = &[
         format: Format::McpServers,
         project_instructions: "AGENTS.md",
         global_instructions: None,
-        hooks: None,
-        project_hooks: None,
+        hooks: Some((".cursor/hooks.json", HookFormat::Cursor)),
+        project_hooks: Some(".cursor/hooks.json"),
     },
     Agent {
         id: "copilot-cli",
@@ -205,8 +215,8 @@ pub const AGENTS: &[Agent] = &[
         format: Format::McpServers,
         project_instructions: "AGENTS.md",
         global_instructions: None,
-        hooks: None,
-        project_hooks: None,
+        hooks: Some((".copilot/hooks/fuckmemory.json", HookFormat::Copilot)),
+        project_hooks: Some(".github/hooks/fuckmemory.json"),
     },
     Agent {
         id: "vscode",
@@ -301,15 +311,37 @@ pub struct Options {
 }
 
 impl HookFormat {
-    /// The `timeout` to write into each hook entry. Claude Code and Codex
-    /// measure it in seconds; Qwen Code in milliseconds. Same intent either way
-    /// (~10s): autosave must never hold a prompt, so if the store is locked by a
-    /// long consolidation we'd rather drop one memory than stall the agent.
+    /// The `timeout` to write into each hook entry. Claude Code, Codex and
+    /// Cursor measure it in seconds; Qwen Code, Gemini CLI in milliseconds;
+    /// Copilot CLI in `timeoutSec`. Same intent either way (~10s): autosave must
+    /// never hold a prompt, so if the store is locked by a long consolidation
+    /// we'd rather drop one memory than stall the agent.
     fn timeout(&self) -> i64 {
         match self {
-            HookFormat::Anthropic => 10,
-            HookFormat::QwenSettings => 10_000,
+            HookFormat::Anthropic | HookFormat::Cursor | HookFormat::Copilot => 10,
+            HookFormat::QwenSettings | HookFormat::GeminiSettings => 10_000,
         }
+    }
+
+    /// The event names this agent uses, paired with the CLI hook argument each
+    /// one maps to.
+    fn events(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            HookFormat::Anthropic | HookFormat::QwenSettings => EVENTS_PASCAL,
+            HookFormat::GeminiSettings => HOOK_EVENTS_GEMINI,
+            HookFormat::Cursor => HOOK_EVENTS_CURSOR,
+            HookFormat::Copilot => HOOK_EVENTS_COPILOT,
+        }
+    }
+
+    /// True when the settings file stores hooks in Anthropic's grouped shape
+    /// (`hooks.<Event>[].hooks[]`); false for the flat `hooks.<Event>[]` maps
+    /// Cursor and Copilot use.
+    fn grouped(&self) -> bool {
+        matches!(
+            self,
+            HookFormat::Anthropic | HookFormat::QwenSettings | HookFormat::GeminiSettings
+        )
     }
 }
 
@@ -360,11 +392,34 @@ pub fn apply(home: &Path, opts: &Options, remove: bool) -> Result<Vec<Change>> {
 }
 
 /// The events autosave listens on, paired with the `fuckmemory hook` argument
-/// each one maps to.
-pub const HOOK_EVENTS: &[(&str, &str)] = &[
+/// each one maps to. Claude Code, Codex and Qwen all spell them in PascalCase.
+const EVENTS_PASCAL: &[(&str, &str)] = &[
     ("UserPromptSubmit", "prompt"),
     ("SessionEnd", "session-end"),
 ];
+
+/// Gemini CLI's equivalents. `BeforeAgent` fires after a prompt is submitted but
+/// before planning, which is exactly where autosave and recall want to run.
+const HOOK_EVENTS_GEMINI: &[(&str, &str)] = &[
+    ("BeforeAgent", "prompt"),
+    ("SessionEnd", "session-end"),
+];
+
+/// Cursor spells its events in camelCase.
+const HOOK_EVENTS_CURSOR: &[(&str, &str)] = &[
+    ("beforeSubmitPrompt", "prompt"),
+    ("sessionEnd", "session-end"),
+];
+
+/// Copilot CLI is camelCase too, and calls the prompt event `userPromptSubmitted`.
+const HOOK_EVENTS_COPILOT: &[(&str, &str)] = &[
+    ("userPromptSubmitted", "prompt"),
+    ("sessionEnd", "session-end"),
+];
+
+/// The events autosave listens on, paired with the `fuckmemory hook` argument
+/// each one maps to.
+pub const HOOK_EVENTS: &[(&str, &str)] = EVENTS_PASCAL;
 
 /// Marks our entries in a settings file we share with the user's own hooks, so
 /// removal never touches a hook somebody else wrote.
@@ -404,15 +459,32 @@ pub fn apply_hooks(home: &Path, opts: &Options, remove: bool) -> Result<Vec<Chan
     Ok(changes)
 }
 
-/// Patch `hooks.<Event>[].hooks[]` in an Anthropic-style settings file — Claude
-/// Code `settings.json`, Codex `hooks.json`, Qwen `settings.json`. The shape is
-/// identical across all three; only the timeout unit differs.
+/// Dispatch a hook patch to the right patcher for the settings file's shape.
+fn patch_hooks(
+    path: &Path,
+    command: &str,
+    agent: &str,
+    format: HookFormat,
+    dry_run: bool,
+    remove: bool,
+) -> Result<What> {
+    if format.grouped() {
+        patch_grouped(path, command, agent, format, dry_run, remove)
+    } else {
+        patch_flat(path, command, agent, format, dry_run, remove)
+    }
+}
+
+/// Patch Anthropic's grouped shape, `hooks.<Event>[].hooks[]`, as used by Claude
+/// Code `settings.json`, Codex `hooks.json`, Qwen and Gemini `settings.json`.
+/// The shape is identical across all four; only the timeout unit differs, and
+/// Gemini additionally gates the whole system behind `hooksConfig.enabled`.
 ///
 /// The file belongs to the user and usually already has hooks in it, so this
 /// edits surgically: our command is identified by the `fuckmemory hook` prefix,
 /// entries that match are replaced or dropped, and every other hook — including
 /// other tools' entries in the same event — is left exactly as found.
-fn patch_hooks(
+fn patch_grouped(
     path: &Path,
     command: &str,
     agent: &str,
@@ -428,7 +500,25 @@ fn patch_hooks(
         );
     }
     let mut changed = false;
-    for (event, arg) in HOOK_EVENTS {
+
+    // The `hooksConfig.enabled` toggle is off by default in some Gemini builds;
+    // our hooks are the whole point of the install, so flip it on when wiring.
+    if format == HookFormat::GeminiSettings && !remove {
+        let on = root
+            .get("hooksConfig")
+            .and_then(|c| c.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !on {
+            if !root.get("hooksConfig").map(Value::is_object).unwrap_or(false) {
+                root["hooksConfig"] = json!({});
+            }
+            root["hooksConfig"]["enabled"] = json!(true);
+            changed = true;
+        }
+    }
+
+    for (event, arg) in format.events() {
         // Identify our entry by the argument shape rather than by the binary
         // name: people rename or relocate the binary, and matching on the path
         // would then append a second copy on every install instead of updating
@@ -501,6 +591,142 @@ fn patch_hooks(
             }
         } else if !found {
             groups.push(json!({ "hooks": [desired] }));
+            changed = true;
+        }
+    }
+
+    if remove
+        && root
+            .get("hooks")
+            .and_then(Value::as_object)
+            .map(|h| h.is_empty())
+            .unwrap_or(false)
+    {
+        root.as_object_mut().unwrap().remove("hooks");
+    }
+    if !changed {
+        return Ok(What::AlreadyDone);
+    }
+    if had_comments {
+        eprintln!(
+            "fuckmemory: {} contained comments; they are not preserved (backup kept alongside)",
+            path.display()
+        );
+    }
+    if !dry_run {
+        backup(path, dry_run)?;
+        write_atomic(path, &format!("{}\n", serde_json::to_string_pretty(&root)?))?;
+    }
+    Ok(if remove {
+        What::RemoveHooks
+    } else {
+        What::WriteHooks
+    })
+}
+
+/// Patch the flat shape Cursor and Copilot CLI use, where each event maps
+/// straight to an array of hook entries with no group wrapper.
+///
+/// Cursor (`hooks.json`) writes `{command, timeout}`; Copilot CLI
+/// (`hooks/*.json`) writes `{type, bash, powershell, timeoutSec}` and spells
+/// its events in camelCase. Both keep a `version` header that we fill in when
+/// creating the file and leave alone otherwise.
+fn patch_flat(
+    path: &Path,
+    command: &str,
+    agent: &str,
+    format: HookFormat,
+    dry_run: bool,
+    remove: bool,
+) -> Result<What> {
+    let (mut root, had_comments) = read_json(path)?;
+    if !root.is_object() {
+        anyhow::bail!(
+            "{} has a non-object top level; refusing to touch it",
+            path.display()
+        );
+    }
+    let mut changed = false;
+
+    if matches!(format, HookFormat::Copilot | HookFormat::Cursor)
+        && !root.get("version").and_then(Value::as_u64).is_some_and(|v| v == 1)
+    {
+        if remove {
+            return Ok(What::AlreadyDone);
+        }
+        root["version"] = json!(1);
+        changed = true;
+    }
+
+    for (event, arg) in format.events() {
+        let marker = format!(" {HOOK_TAG} {arg} --agent ");
+        // Copilot keyed its entry field differently (`bash` vs `command`), but
+        // the marker lives inside whichever one holds the command, so matching
+        // is the same against every entry.
+        let is_ours = |entry: &Value| -> bool {
+            entry
+                .get("command")
+                .and_then(Value::as_str)
+                .or_else(|| entry.get("bash").and_then(Value::as_str))
+                .map(|c| c.contains(&marker))
+                .unwrap_or(false)
+        };
+
+        if !root.get("hooks").map(Value::is_object).unwrap_or(false) {
+            if remove {
+                continue;
+            }
+            root["hooks"] = json!({});
+        }
+        if !root["hooks"]
+            .get(*event)
+            .map(Value::is_array)
+            .unwrap_or(false)
+        {
+            if remove {
+                continue;
+            }
+            root["hooks"][*event] = json!([]);
+        }
+        let list = root["hooks"][*event].as_array_mut().unwrap();
+        let cmd = hook_command(command, agent, arg);
+
+        if remove {
+            let before = list.len();
+            list.retain(|e| !is_ours(e));
+            changed |= list.len() != before;
+            if list.is_empty() {
+                root["hooks"].as_object_mut().unwrap().remove(*event);
+            }
+        } else if let Some(slot) = list.iter_mut().find(|e| is_ours(e)) {
+            if format == HookFormat::Cursor {
+                let desired = json!({ "command": cmd, "timeout": format.timeout() });
+                if *slot != desired {
+                    *slot = desired;
+                    changed = true;
+                }
+            } else {
+                let desired = json!({
+                    "type": "command",
+                    "bash": cmd,
+                    "powershell": cmd,
+                    "timeoutSec": format.timeout(),
+                });
+                if *slot != desired {
+                    *slot = desired;
+                    changed = true;
+                }
+            }
+        } else if format == HookFormat::Cursor {
+            list.push(json!({ "command": cmd, "timeout": format.timeout() }));
+            changed = true;
+        } else {
+            list.push(json!({
+                "type": "command",
+                "bash": cmd,
+                "powershell": cmd,
+                "timeoutSec": format.timeout(),
+            }));
             changed = true;
         }
     }
@@ -1249,9 +1475,9 @@ mod tests {
     #[test]
     fn agents_without_a_known_hook_format_are_left_alone() {
         let home = tmpdir("hooks-unknown");
-        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        std::fs::create_dir_all(home.join(".config/opencode")).unwrap();
         let mut opts = hook_opts(false);
-        opts.only = Some(vec!["cursor".into()]);
+        opts.only = Some(vec!["opencode".into()]);
         assert!(apply_hooks(&home, &opts, false).unwrap().is_empty());
     }
 
@@ -1317,6 +1543,175 @@ mod tests {
                 .contains("hooks"),
             "emptied qwen hooks block should be dropped"
         );
+    }
+
+    /// Gemini is Anthropic-shaped with a milliseconds timeout, CamelCase events
+    /// of its own, and a `hooksConfig.enabled` toggle that must be on for the
+    /// hooks to fire at all.
+    #[test]
+    fn gemini_hooks_turn_on_hooksconfig_and_use_beforeagent() {
+        let home = tmpdir("hooks-gemini");
+        std::fs::create_dir_all(home.join(".gemini")).unwrap();
+        let base = Options {
+            command: "/bin/fm".into(),
+            global: true,
+            project: None,
+            only: Some(vec!["gemini-cli".into()]),
+            instructions: false,
+            hooks: true,
+            dry_run: false,
+        };
+
+        apply_hooks(&home, &base, false).unwrap();
+        let v: Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".gemini/settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            v["hooksConfig"]["enabled"], true,
+            "hooksConfig.enabled must be on"
+        );
+        assert!(v["hooks"].get("BeforeAgent").is_some());
+        assert!(v["hooks"].get("SessionEnd").is_some());
+        assert!(v["hooks"].get("UserPromptSubmit").is_none());
+        assert_eq!(
+            v["hooks"]["BeforeAgent"][0]["hooks"][0]["timeout"], 10_000,
+            "gemini measures timeout in milliseconds"
+        );
+        assert!(v["hooks"]["BeforeAgent"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("--agent gemini-cli"));
+
+        let again = apply_hooks(&home, &base, false).unwrap();
+        assert!(
+            again.iter().all(|c| c.what == What::AlreadyDone),
+            "second run should be a no-op: {again:?}"
+        );
+
+        let undo = apply_hooks(&home, &base, true).unwrap();
+        assert!(undo.iter().any(|c| c.what == What::RemoveHooks));
+    }
+
+    /// Cursor keeps a flat `{command, timeout}` array per event with a `version`
+    /// header, so the patch must not build Anthropic's nested group shape.
+    #[test]
+    fn cursor_hooks_are_flat_with_version_and_timeout_in_seconds() {
+        let home = tmpdir("hooks-cursor");
+        std::fs::create_dir_all(home.join(".cursor")).unwrap();
+        let base = Options {
+            command: "/bin/fm".into(),
+            global: true,
+            project: None,
+            only: Some(vec!["cursor".into()]),
+            instructions: false,
+            hooks: true,
+            dry_run: false,
+        };
+
+        apply_hooks(&home, &base, false).unwrap();
+        let v: Value =
+            serde_json::from_str(&std::fs::read_to_string(home.join(".cursor/hooks.json")).unwrap())
+                .unwrap();
+        assert_eq!(v["version"], 1);
+        assert!(v["hooks"].get("beforeSubmitPrompt").is_some());
+        assert!(v["hooks"].get("sessionEnd").is_some());
+        let entry = &v["hooks"]["beforeSubmitPrompt"][0];
+        assert_eq!(entry["timeout"], 10);
+        assert!(entry.get("type").is_none(), "cursor needs no type field");
+        assert!(
+            entry["command"].as_str().unwrap().contains("hook prompt --agent cursor"),
+            "got {entry}"
+        );
+        assert!(
+            v["hooks"]["beforeSubmitPrompt"][0]
+                .get("hooks")
+                .is_none(),
+            "must stay flat, not nested: {v}"
+        );
+
+        let undo = apply_hooks(&home, &base, true).unwrap();
+        assert!(undo.iter().any(|c| c.what == What::RemoveHooks));
+        assert!(
+            !std::fs::read_to_string(home.join(".cursor/hooks.json"))
+                .unwrap()
+                .contains("fuckmemory"),
+            "uninstall must clear our entries"
+        );
+    }
+
+    /// Copilot CLI uses `{type, bash, powershell, timeoutSec}` flat entries and
+    /// camelCase event names, and user-level hooks live under `hooks/`.
+    #[test]
+    fn copilot_hooks_use_bash_keys_and_camelcase_events() {
+        let home = tmpdir("hooks-copilot");
+        std::fs::create_dir_all(home.join(".copilot")).unwrap();
+        let base = Options {
+            command: "/bin/fm".into(),
+            global: true,
+            project: None,
+            only: Some(vec!["copilot-cli".into()]),
+            instructions: false,
+            hooks: true,
+            dry_run: false,
+        };
+
+        apply_hooks(&home, &base, false).unwrap();
+        let v: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".copilot/hooks/fuckmemory.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["version"], 1);
+        assert!(v["hooks"].get("userPromptSubmitted").is_some());
+        assert!(v["hooks"].get("sessionEnd").is_some());
+        let entry = &v["hooks"]["userPromptSubmitted"][0];
+        assert_eq!(entry["type"], "command");
+        assert_eq!(entry["timeoutSec"], 10);
+        assert!(
+            entry["bash"]
+                .as_str()
+                .unwrap()
+                .contains("hook prompt --agent copilot-cli"),
+            "got {entry}"
+        );
+
+        let undo = apply_hooks(&home, &base, true).unwrap();
+        assert!(undo.iter().any(|c| c.what == What::RemoveHooks));
+        assert!(
+            !std::fs::read_to_string(home.join(".copilot/hooks/fuckmemory.json"))
+                .unwrap()
+                .contains("fuckmemory")
+        );
+    }
+
+    #[test]
+    fn project_and_global_hook_targets_are_distinct() {
+        let home = tmpdir("hooks-proj");
+        let proj = tmpdir("hooks-proj-ws");
+        for d in [".gemini", ".cursor", ".copilot"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        std::fs::create_dir_all(proj.join(".github")).unwrap();
+        let base = Options {
+            command: "/bin/fm".into(),
+            global: true,
+            project: Some(proj.clone()),
+            only: Some(vec!["gemini-cli".into(), "cursor".into(), "copilot-cli".into()]),
+            instructions: false,
+            hooks: true,
+            dry_run: false,
+        };
+
+        let first = apply_hooks(&home, &base, false).unwrap();
+        assert!(
+            first.len() >= 5,
+            "each agent gets a global and where applicable a project hook: {first:?}"
+        );
+        assert!(
+            proj.join(".github/hooks/fuckmemory.json").exists(),
+            "copilot project hooks live in .github/hooks/"
+        );
+        assert!(proj.join(".cursor/hooks.json").exists());
+        assert!(proj.join(".gemini/settings.json").exists());
     }
 
     #[test]

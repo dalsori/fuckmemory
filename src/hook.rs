@@ -49,8 +49,19 @@ impl Event {
             .replace(['_', ' '], "-")
             .as_str()
         {
-            "prompt" | "userpromptsubmit" | "user-prompt-submit" | "submit" => Some(Self::Prompt),
-            "session-end" | "sessionend" | "stop" | "end" => Some(Self::SessionEnd),
+            "prompt"
+            | "userpromptsubmit"
+            | "user-prompt-submit"
+            | "userpromptsubmitted"
+            | "user-prompt-submitted"
+            | "submit"
+            | "beforeagent"
+            | "before-agent"
+            | "beforesubmitprompt"
+            | "before-submit-prompt" => Some(Self::Prompt),
+            "session-end" | "sessionend" | "session-ended" | "stop" | "end" => {
+                Some(Self::SessionEnd)
+            }
             _ => None,
         }
     }
@@ -632,19 +643,34 @@ fn looks_secret(word: &str) -> bool {
     false
 }
 
-/// The JSON Claude Code expects back from a `UserPromptSubmit` hook when we have
-/// context to add. Anything else on stdout would be shown to the user as noise.
-pub fn claude_code_output(event: Event, context: &str) -> Value {
-    let name = match event {
-        Event::Prompt => "UserPromptSubmit",
-        Event::SessionEnd => "SessionEnd",
+/// The JSON an agent reads back when we have context to add.
+///
+/// Claude Code, Codex, Qwen Code and Gemini all speak the same
+/// `hookSpecificOutput.additionalContext` shape; only the event name differs.
+/// Returns `None` for agents whose hook channel cannot carry context — Cursor
+/// `beforeSubmitPrompt` is informational-only, and Copilot CLI ignores the
+/// output of `userPromptSubmitted` entirely — so printing anything there is noise.
+pub fn hook_output(agent: &str, event: Event, context: &str) -> Option<Value> {
+    if matches!(agent, "cursor" | "copilot-cli") {
+        return None;
+    }
+    let name = if agent == "gemini-cli" {
+        match event {
+            Event::Prompt => "BeforeAgent",
+            Event::SessionEnd => "SessionEnd",
+        }
+    } else {
+        match event {
+            Event::Prompt => "UserPromptSubmit",
+            Event::SessionEnd => "SessionEnd",
+        }
     };
-    json!({
+    Some(json!({
         "hookSpecificOutput": {
             "hookEventName": name,
             "additionalContext": context,
         }
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -783,7 +809,11 @@ mod tests {
     fn event_names_map_from_every_agents_spelling() {
         assert_eq!(Event::parse("UserPromptSubmit"), Some(Event::Prompt));
         assert_eq!(Event::parse("prompt"), Some(Event::Prompt));
+        assert_eq!(Event::parse("BeforeAgent"), Some(Event::Prompt));
+        assert_eq!(Event::parse("beforeSubmitPrompt"), Some(Event::Prompt));
+        assert_eq!(Event::parse("userPromptSubmitted"), Some(Event::Prompt));
         assert_eq!(Event::parse("SessionEnd"), Some(Event::SessionEnd));
+        assert_eq!(Event::parse("sessionEnd"), Some(Event::SessionEnd));
         assert_eq!(Event::parse("stop"), Some(Event::SessionEnd));
         assert_eq!(Event::parse("nonsense"), None);
     }

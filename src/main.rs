@@ -48,7 +48,7 @@ enum Cmd {
         /// Don't download the embedding model
         #[arg(long)]
         no_model: bool,
-        /// Turn on autosave and wire the per-prompt hooks (Claude Code today)
+        /// Turn on autosave and wire the per-prompt hooks
         #[arg(long)]
         autosave: bool,
         /// Don't touch hooks, even when autosave is already enabled
@@ -629,13 +629,11 @@ fn cmd_hook(
     match fuckmemory::hook::run(cfg, ev, text, &meta, &agent) {
         Ok(out) => {
             if let Some(ctx) = &out.context {
-                // Claude Code reads this JSON and appends `additionalContext` to
-                // the prompt. Other agents get the plain text on stdout, which is
-                // what every hook system in the wild does with it.
-                if agent == "claude-code" {
-                    println!("{}", fuckmemory::hook::claude_code_output(ev, ctx));
-                } else {
-                    println!("{ctx}");
+                // Claude Code, Codex, Qwen and Gemini read this JSON and append
+                // `additionalContext` to the prompt. Agents whose hook channel
+                // can't carry context back (Cursor, Copilot CLI) print nothing.
+                if let Some(v) = fuckmemory::hook::hook_output(&agent, ev, ctx) {
+                    println!("{v}");
                 }
             }
             if verbose {

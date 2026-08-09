@@ -100,6 +100,10 @@ git clone https://github.com/dalsori/fuckmemory && cd fuckmemory
 ./install.sh
 ```
 
+Or grab a prebuilt binary from the
+[releases](https://github.com/dalsori/fuckmemory/releases) (no Rust toolchain
+needed), then run `fuckmemory install` to wire your agents.
+
 Or manually:
 
 ```bash
@@ -113,6 +117,40 @@ actually run. `install.sh` deletes the `~/.cargo/bin` copy for that reason.
 
 `install` is idempotent, backs up every file it edits, and `fuckmemory uninstall`
 reverses it. Add `--dry-run` to see the plan first.
+
+## Upgrading
+
+Your memories live somewhere the binary never touches — everything you stored is
+under `~/.local/share/fuckmemory` (or `$FUCKMEMORY_HOME`): database, model,
+config. Upgrading only replaces the executable, so **nothing is lost**. Run
+`fuckmemory doctor` afterwards to confirm the store is intact and the agent
+configs are still wired.
+
+If you keep a clone of the repo:
+
+```bash
+cd fuckmemory
+git pull
+./install.sh                     # rebuild + replace the binary in place
+```
+
+Or pull just the newest binary from a release:
+
+```bash
+ver=1.1.1                                        # or whatever is latest
+curl -L -o /tmp/fuckmemory.gz \
+  https://github.com/dalsori/fuckmemory/releases/download/v$ver/fuckmemory-linux-x86_64.gz
+gunzip -f /tmp/fuckmemory.gz && chmod +x /tmp/fuckmemory
+install -m 755 /tmp/fuckmemory ~/.local/bin/fuckmemory
+
+# your agents still point at the old path/command; this rewrites the configs to
+# the fresh binary and picks up any new hooks. Idempotent, edits nothing of yours.
+fuckmemory install --command ~/.local/bin/fuckmemory --autosave
+```
+
+For `cargo install` users: `cargo install --path . --force` in the repo.
+
+Check what moved between versions in the [CHANGELOG](CHANGELOG.md).
 
 ### What gets written where
 

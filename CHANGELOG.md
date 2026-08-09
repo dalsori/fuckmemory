@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-08-08
+
+### Added
+
+- **Memory is shared between agents automatically.** `install` detects every
+  coding agent on the machine and wires the same store into all of them — no
+  manual MCP setup, no per-agent copies. Anything one agent remembers is
+  instantly recallable by every other.
+- **Autosave + auto-recall.** With `install --autosave` the store is no longer
+  voluntary: every prompt is kept, durable knowledge is extracted, and relevant
+  memories are injected back into every prompt — across agents, with no model
+  call in the write path (~5 ms per message).
+- **Fused retrieval** ranking BM25, static-int8 embeddings and graph-neighbor
+  expansion with Reciprocal Rank Fusion and MMR dedup, hard-capped by a token
+  budget so recall never eats a context window.
+- **Bitemporal graph with time travel.** `valid_from/valid_to` and
+  `recorded_at/invalidated_at` in SQLite; `--as-of` answers what you believed on
+  any past date.
+- **~1 ms cold start** with the mmap'd, verified f16 embedding cache, and a
+  `tui` for settings, agents and memories without touching config files.
+
 ## [0.1.0] - 2026-08-03
 
 Initial release.

@@ -161,6 +161,7 @@ pub fn run(
                 limit: cfg.autorecall_limit.max(1),
                 ..Default::default()
             },
+            None,
         )?;
         let rendered = pack::render(
             &r,

@@ -783,6 +783,7 @@ fn cmd_recall(
             hops: hops.min(2),
             include_episodes: raw,
         },
+        None,
     )?;
 
     if json {
@@ -841,7 +842,7 @@ fn cmd_explain(cfg: &Config, query: Vec<String>, scope_spec: Option<String>) -> 
 
     match cached_embedder(cfg) {
         Some(e) => {
-            let scored = retrieve::explain_vectors(&conn, &scope_ids, &e, &text)?;
+            let scored = retrieve::explain_vectors(&conn, &scope_ids, &e, &text, None)?;
             println!("\ncosine  kept  fact");
             let top = scored.first().map(|(_, s)| *s).unwrap_or(0.0);
             let rows =
@@ -891,6 +892,7 @@ fn cmd_forget(
                     limit: 1,
                     ..Default::default()
                 },
+                None,
             )?;
             let hit = r
                 .hits

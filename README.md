@@ -414,8 +414,12 @@ fuckmemory consolidate && fuckmemory prune --days 90
   is relative to the best match, because measured cosines make an absolute
   threshold impossible: good matches land at 0.09–0.21 while an unrelated query
   still peaks at 0.12. Ranges overlap, so no fixed cutoff separates them.
-- **Vectors are re-read from SQLite on every query.** Fine to ~10k facts (~5 ms);
-  at 100k this becomes the bottleneck and wants an in-process cache.
+- **The vector index is re-read from SQLite when the store changes.** The
+  long-lived MCP server keeps one index in process and only reloads it when
+  `data_version` says another process wrote; one-shot commands (`recall`,
+  the autosave hook) pay it every time, which is fine to ~10k facts (~5 ms)
+  and becomes the bottleneck around 100k. Re-reads happen per command, not
+  per query inside a running agent.
 - **JSONC comments are lost.** Configs with comments (OpenCode, VS Code) are
   rewritten as plain JSON. A backup is kept next to the original and a warning is
   printed. TOML keeps its comments — `toml_edit` preserves them.

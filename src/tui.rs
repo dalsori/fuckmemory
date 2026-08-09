@@ -260,6 +260,7 @@ impl App {
                         limit: 60,
                         ..Default::default()
                     },
+                    None,
                 )?;
                 for hit in r.hits {
                     self.memories.push(MemoryRow {

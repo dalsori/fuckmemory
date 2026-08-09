@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 use crate::config::now;
 use crate::db::VEC_FACT;
-use crate::embed::{self, cosine_q, Embedder, VecIndex};
+use crate::embed::{self, cosine_q, Embedder, VecCache, VecIndex};
 use crate::graph::{self, FactRow, When};
 
 /// RRF damping. 60 is the value from the original RRF paper and is what every
@@ -236,8 +236,10 @@ pub fn explain_vectors(
     scope_ids: &[i64],
     emb: &Embedder,
     text: &str,
+    cache: Option<&mut VecCache>,
 ) -> Result<Vec<(i64, f32)>> {
-    let idx = VecIndex::load_facts(conn, scope_ids, When::Live)?;
+    let idx = IndexSource::get(conn, scope_ids, When::Live, cache)?;
+    let idx = idx.as_ref();
     if idx.is_empty() || idx.dim != emb.dim {
         return Ok(Vec::new());
     }
@@ -358,12 +360,45 @@ fn mmr(
     picked
 }
 
-/// Run a recall.
+/// Where a vector index comes from: the per-connection cache when one was
+/// passed, else a fresh load. Keeping both behind one pointer means `recall`
+/// does not care which side produced it.
+enum IndexSource<'a> {
+    Cached(&'a VecIndex),
+    Owned(VecIndex),
+}
+
+impl<'a> IndexSource<'a> {
+    fn get(
+        conn: &Connection,
+        scope_ids: &[i64],
+        when: When,
+        cache: Option<&'a mut VecCache>,
+    ) -> Result<Self> {
+        match cache {
+            Some(c) => Ok(IndexSource::Cached(c.index(conn, scope_ids, when)?)),
+            None => Ok(IndexSource::Owned(VecIndex::load_facts(
+                conn, scope_ids, when,
+            )?)),
+        }
+    }
+
+    fn as_ref(&self) -> &VecIndex {
+        match self {
+            IndexSource::Cached(i) => i,
+            IndexSource::Owned(i) => i,
+        }
+    }
+}
+
+/// Run a recall. `cache` is the per-connection vector index cache (the MCP
+/// server keeps one across calls); one-shot processes pass `None`.
 pub fn recall(
     conn: &Connection,
     scope_ids: &[i64],
     emb: Option<&Embedder>,
     q: &Query,
+    cache: Option<&mut VecCache>,
 ) -> Result<Recall> {
     let t0 = std::time::Instant::now();
     let ts = now();
@@ -379,7 +414,8 @@ pub fn recall(
     let mut vec_ids: Vec<i64> = Vec::new();
     let mut semantic = false;
     if let Some(e) = emb {
-        let idx = VecIndex::load_facts(conn, scope_ids, q.when)?;
+        let idx = IndexSource::get(conn, scope_ids, q.when, cache)?;
+        let idx = idx.as_ref();
         if !idx.is_empty() && idx.dim == e.dim {
             let scored = idx.topk(&e.embed_q(&q.text), PER_RETRIEVER);
             let top = scored.first().map(|(_, s)| *s).unwrap_or(0.0);
@@ -599,6 +635,7 @@ mod tests {
                 text: "how do deploys work".into(),
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         assert!(!r.hits.is_empty());
@@ -624,6 +661,7 @@ mod tests {
                 limit: 10,
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         let found = r.hits.iter().find(|h| h.fact.statement.contains("Node 22"));
@@ -650,6 +688,7 @@ mod tests {
                 hops: 0,
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         assert!(r.hits.iter().all(|h| !h.via.contains(&"graph")));
@@ -685,6 +724,7 @@ mod tests {
                 text: "package manager npm".into(),
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         assert!(live
@@ -701,6 +741,7 @@ mod tests {
                 when: When::AsOf(t_mid),
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         assert!(
@@ -738,6 +779,7 @@ mod tests {
                 limit: 10,
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         // Without MMR all three come back; jaccard sim between them is ~0.8-0.9.
@@ -759,6 +801,7 @@ mod tests {
                 text: "  ".into(),
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         assert!(r.hits.is_empty());
@@ -785,6 +828,7 @@ mod tests {
                 limit: 2,
                 ..Default::default()
             },
+            None,
         )
         .unwrap();
         assert!(r.hits.len() <= 2);

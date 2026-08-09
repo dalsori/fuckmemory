@@ -16,7 +16,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use crate::config::{now, Config};
-use crate::embed::Embedder;
+use crate::embed::{Embedder, VecCache};
 use crate::graph::When;
 use crate::pack::{self, PackOptions};
 use crate::retrieve::{self, Query};
@@ -34,6 +34,8 @@ pub struct Server {
     /// Load the model at most once, and never retry a failure on every call.
     emb_resolved: bool,
     cwd: PathBuf,
+    /// Reuses the vector index across recalls; invalidated after our own writes.
+    vec_cache: VecCache,
 }
 
 impl Server {
@@ -45,6 +47,7 @@ impl Server {
             emb: None,
             emb_resolved: false,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            vec_cache: VecCache::new(),
         })
     }
 
@@ -258,7 +261,13 @@ impl Server {
         };
 
         self.ensure_embedder();
-        let r = retrieve::recall(&self.conn, &scope_ids, self.emb.as_ref(), &q)?;
+        let r = retrieve::recall(
+            &self.conn,
+            &scope_ids,
+            self.emb.as_ref(),
+            &q,
+            Some(&mut self.vec_cache),
+        )?;
 
         let out = pack::render(
             &r,
@@ -302,6 +311,9 @@ impl Server {
 
         self.ensure_embedder();
         let out = store::remember(&mut self.conn, &sc, self.emb.as_ref(), &input)?;
+        // Our own write does not move `data_version`, so the vector cache would
+        // silently miss the new fact unless dropped here.
+        self.vec_cache.invalidate();
 
         let mut msg = if out.duplicate {
             format!("Already remembered (episode {}).", out.episode_id)
@@ -346,6 +358,7 @@ impl Server {
                         limit: 1,
                         ..Default::default()
                     },
+                    Some(&mut self.vec_cache),
                 )?;
                 r.hits
                     .first()
@@ -360,6 +373,9 @@ impl Server {
         } else {
             store::invalidate(&self.conn, &sc, id)?
         };
+        // Same rationale as `remember`: a retraction is a write this connection
+        // made, invisible to `data_version`.
+        self.vec_cache.invalidate();
         Ok(if ok {
             format!("{} fact {id}.", if hard { "Deleted" } else { "Retracted" })
         } else {

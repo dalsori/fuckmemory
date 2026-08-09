@@ -272,6 +272,7 @@ pub fn cosine_q(a: &[i8], b: &[i8]) -> f32 {
 
 /// Flat int8 matrix of candidate vectors, loaded once per query (or once per
 /// process for the long-lived MCP server).
+#[derive(Debug)]
 pub struct VecIndex {
     pub dim: usize,
     pub ids: Vec<i64>,
@@ -360,6 +361,66 @@ impl VecIndex {
     }
 }
 
+/// Per-connection cache of the last-built vector index.
+///
+/// The MCP server answers many recalls over one long-lived connection, and at
+/// ~100k facts re-reading every vector from SQLite on each one becomes the
+/// bottleneck. This keeps the most recently built index around and reuses it
+/// while the store provably unchanged.
+///
+/// Validity is decided by `PRAGMA data_version` read on the *same* connection:
+/// it changes when any other connection commits — other processes (hooks, CLI)
+/// included — and not for writes made by this one. So external writes
+/// invalidate automatically, and the server must call [`VecCache::invalidate`]
+/// after its own `remember`/`forget`, which `data_version` cannot see.
+///
+/// One slot is enough. An agent tends to repeat the same question set, so
+/// consecutive recalls hit; a key change just rebuilds, which is no worse than
+/// today.
+#[derive(Debug, Default)]
+pub struct VecCache {
+    /// The key the cached index was built for, if any.
+    key: Option<(Vec<i64>, When)>,
+    /// `data_version` of this connection when the index was built.
+    version: i64,
+    idx: Option<VecIndex>,
+}
+
+impl VecCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Drop whatever is cached. The server calls this after a write on this
+    /// connection, which `data_version` does not reflect.
+    pub fn invalidate(&mut self) {
+        self.key = None;
+        self.idx = None;
+    }
+
+    /// The index for these scopes at `when`: the cached one when it is fresh,
+    /// otherwise a reload that replaces the cache.
+    pub fn index(&mut self, conn: &Connection, scope_ids: &[i64], when: When) -> Result<&VecIndex> {
+        let version = data_version(conn)?;
+        let key = (scope_ids.to_vec(), when);
+        let fresh =
+            self.key.as_ref() == Some(&key) && self.version == version && self.idx.is_some();
+        if !fresh {
+            self.idx = Some(VecIndex::load_facts(conn, scope_ids, when)?);
+            self.key = Some(key);
+            self.version = version;
+        }
+        Ok(self.idx.as_ref().expect("just set"))
+    }
+}
+
+/// `PRAGMA data_version`: changes when another connection commits to the same
+/// database file; unchanged for writes on this connection. Only meaningful
+/// compared between two reads on the same connection, which is all we do.
+fn data_version(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("PRAGMA data_version", [], |r| r.get(0))?)
+}
+
 /// Fetch vectors for a specific set of ids. Used by MMR, which needs random
 /// access to a few dozen candidates rather than a full scan.
 pub fn load_vecs(
@@ -440,6 +501,7 @@ pub fn prefetch(cfg: &Config) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scope;
 
     #[test]
     fn quantize_roundtrip_preserves_similarity() {
@@ -546,5 +608,99 @@ mod tests {
             data: vec![],
         };
         assert!(idx.topk(&[1, 2, 3], 5).is_empty());
+    }
+
+    /// The cache serves the same index while nothing else writes, and reloads
+    /// as soon as a *different* connection commits (which is how the hook and
+    /// the CLI make writes visible to the long-lived MCP server).
+    #[test]
+    fn vec_cache_reloads_when_another_connection_writes() {
+        use crate::store::{self, FactInput, RememberInput};
+        use std::path::Path;
+
+        let dir = std::env::temp_dir().join(format!(
+            "fm-vcache-{}-{}",
+            std::process::id(),
+            std::sync::atomic::AtomicU32::new(0).fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let path = dir.join("store.sqlite");
+        let mk = |conn: &mut Connection, dst: &str| -> i64 {
+            let sc = scope::resolve(conn, Some("/tmp/fm-vcache"), Path::new("/")).unwrap();
+            let out = store::remember(
+                conn,
+                &sc,
+                None,
+                &RememberInput {
+                    text: format!("the project uses {dst}"),
+                    kind: "decision".into(),
+                    source: "test".into(),
+                    facts: vec![FactInput {
+                        src: Some("project".into()),
+                        rel: "uses".into(),
+                        dst: Some(dst.into()),
+                        statement: format!("the project uses {dst}"),
+                        valid_from: None,
+                        valid_to: None,
+                        confidence: 1.0,
+                        supersede: None,
+                    }],
+                    meta: None,
+                    derive: true,
+                },
+            )
+            .unwrap();
+            let id = out.fact_ids[0];
+            put_vec(conn, db::VEC_FACT, id, &quantize(&[1.0, 0.0, 0.0, 0.0])).unwrap();
+            id
+        };
+
+        let mut first = db::open(&path).unwrap();
+        let sc = scope::resolve(&first, Some("/tmp/fm-vcache"), Path::new("/")).unwrap();
+        let a = mk(&mut first, "npm");
+        let mut cache = VecCache::new();
+
+        let idx = cache.index(&first, &[sc.id], When::Live).unwrap();
+        assert_eq!(idx.ids, vec![a]);
+        let first_ver = cache.version;
+        assert_ne!(first_ver, 0, "data_version must be non-zero on a real file");
+
+        // Another connection writing is the only thing data_version sees.
+        let mut other = db::open(&path).unwrap();
+        let b = mk(&mut other, "pnpm");
+
+        // The value of data_version changed, so the next read must reload.
+        let idx2 = cache.index(&first, &[sc.id], When::Live).unwrap();
+        assert!(
+            idx2.ids.contains(&b),
+            "external write must invalidate the cache: {:?}",
+            idx2.ids
+        );
+        // And it stays cached now — a second read must not change the version.
+        let ver_after = cache.version;
+        assert_ne!(ver_after, first_ver);
+        let idx3 = cache.index(&first, &[sc.id], When::Live).unwrap();
+        assert!(idx3.ids.contains(&b));
+        assert_eq!(cache.version, ver_after, "no rewrite when nothing changed");
+
+        // Our own connection writing does NOT touch data_version, so the cache
+        // stays as it was — the server invalidates explicitly in that case.
+        let c = mk(&mut first, "yarn");
+        {
+            let idx4 = cache.index(&first, &[sc.id], When::Live).unwrap();
+            assert!(
+                !idx4.ids.contains(&c),
+                "explicit invalidate() is the contract"
+            );
+        }
+        assert_eq!(
+            cache.version, ver_after,
+            "own writes don't move data_version"
+        );
+
+        cache.invalidate();
+        let idx5 = cache.index(&first, &[sc.id], When::Live).unwrap();
+        assert!(idx5.ids.contains(&c), "invalidate must force a reload");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -23,6 +23,7 @@
 
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::path::Path;
 
 use crate::config::Config;
 use crate::embed::{Embedder, VecCache};
@@ -266,7 +267,9 @@ pub fn run(
     }
 
     let (mut body, redactions) = if cfg.redact {
-        redact(&text)
+        let (b, n) = redact(&text);
+        let (b, m) = redact_paths(&b, &cfg.ignore_paths, &crate::config::home_dir());
+        (b, n + m)
     } else {
         (text.clone(), 0)
     };
@@ -644,6 +647,128 @@ pub fn redact(text: &str) -> (String, usize) {
     (out, count)
 }
 
+/// A tiny glob matcher for path redaction. Supports `*` (any run within a
+/// segment), `**` (any number of segments) and `?` (one character). `~` at the
+/// start expands to the home directory. Everything else is a literal prefix
+/// match. Deliberately small: a full `glob` crate would drag a big dependency
+/// into a binary that has to start in milliseconds.
+fn path_glob_match(glob: &str, path: &str, home: &Path) -> bool {
+    let g = if let Some(rest) = glob.strip_prefix("~/") {
+        if let Some(h) = home.to_str() {
+            if let Some(p) = path.strip_prefix(h) {
+                return path_glob_match(&format!("**/{rest}"), p.trim_start_matches('/'), home);
+            }
+            return false;
+        }
+        glob
+    } else {
+        glob
+    };
+    // A leading slash anchors to the root; otherwise match against the whole
+    // path and any trailing segment (so `.env` matches `project/.env`).
+    let anchored = g.starts_with('/');
+    let g = g.trim_start_matches('/');
+    let target = if anchored {
+        path
+    } else {
+        path.trim_start_matches('/')
+    };
+
+    if anchored {
+        glob_scan(g, target)
+    } else {
+        // Match the whole path, or any single trailing segment — so a bare
+        // name like `.env` catches `project/.env` while `src/*.pem` still
+        // needs the full path to align.
+        glob_scan(g, target) || target.split('/').any(|seg| glob_scan(g, seg))
+    }
+}
+
+/// Recursive glob scan over segments. `**` swallows zero or more segments.
+fn glob_scan(pat: &str, path: &str) -> bool {
+    let p: Vec<&str> = pat.split('/').filter(|s| !s.is_empty()).collect();
+    let t: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    scan_seg(&p, &t)
+}
+
+fn scan_seg(pats: &[&str], segs: &[&str]) -> bool {
+    match pats.first() {
+        None => segs.is_empty(),
+        Some(&"**") => {
+            // `**` alone eats everything; `**/rest` eats any prefix.
+            if pats.len() == 1 {
+                return true;
+            }
+            for i in 0..=segs.len() {
+                if scan_seg(&pats[1..], &segs[i..]) {
+                    return true;
+                }
+            }
+            false
+        }
+        Some(&pat) => {
+            if segs.is_empty() {
+                return false;
+            }
+            seg_match(pat, segs[0]) && scan_seg(&pats[1..], &segs[1..])
+        }
+    }
+}
+
+/// Match a single path segment against a `*`/`?` pattern (no `/`).
+fn seg_match(pat: &str, seg: &str) -> bool {
+    let pat: Vec<char> = pat.chars().collect();
+    let seg: Vec<char> = seg.chars().collect();
+    fn go(p: &[char], s: &[char]) -> bool {
+        match p.first() {
+            None => s.is_empty(),
+            Some(&'*') => {
+                for i in 0..=s.len() {
+                    if go(&p[1..], &s[i..]) {
+                        return true;
+                    }
+                }
+                false
+            }
+            Some(&'?') => !s.is_empty() && go(&p[1..], &s[1..]),
+            Some(&c) => !s.is_empty() && s[0] == c && go(&p[1..], &s[1..]),
+        }
+    }
+    go(&pat, &seg)
+}
+
+/// Redact path-shaped tokens that match any of `globs`, returning the redacted
+/// text and how many paths were replaced. This runs *after* the token
+/// redaction, so the path itself is replaced with a marker regardless of what
+/// follows it — `cat ~/.aws/credentials` loses the path even though no token
+/// rule would catch it.
+pub fn redact_paths(text: &str, globs: &[String], home: &Path) -> (String, usize) {
+    if globs.is_empty() {
+        return (text.to_string(), 0);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut count = 0usize;
+    for token in text.split_inclusive(char::is_whitespace) {
+        let word = token.trim_end();
+        if !word.is_empty() && path_glob_match_any(word, globs, home) {
+            out.push_str("[redacted]");
+            out.push_str(&token[word.len()..]);
+            count += 1;
+        } else {
+            out.push_str(token);
+        }
+    }
+    (out, count)
+}
+
+fn path_glob_match_any(word: &str, globs: &[String], home: &Path) -> bool {
+    // Paths in prose often carry trailing punctuation or quotes. Trim only the
+    // end: leading dots are significant (`*.env`, `~/.aws`), so a bare `.env`
+    // must keep its dot.
+    let word = word.trim_end_matches([',', ';', ')', ']', '.', '"', '\'']);
+    globs.iter().any(|g| path_glob_match(g, word, home))
+}
+
 const QUOTES: &[char] = &['"', '\'', '`'];
 
 fn clean_key(word: &str) -> String {
@@ -946,6 +1071,64 @@ mod tests {
     fn preserves_whitespace_exactly() {
         let text = "line one\n\tindented  double  spaced\n";
         assert_eq!(redact(text).0, text);
+    }
+
+    #[test]
+    fn redacts_paths_matching_ignore_globs() {
+        let home = std::path::Path::new("/home/test");
+        let globs = vec![".env".to_string(), "*.pem".to_string()];
+        let (out, n) = redact_paths(
+            "check cat .env and /srv/app/secret.pem, then src/main.rs",
+            &globs,
+            home,
+        );
+        assert!(out.contains("[redacted]"), "got {out}");
+        assert!(!out.contains(".env"), "got {out}");
+        assert!(!out.contains("secret.pem"), "got {out}");
+        assert!(
+            out.contains("src/main.rs"),
+            "unrelated path must survive: {out}"
+        );
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn redact_paths_matches_trailing_segment_and_home_tilde() {
+        let home = std::path::Path::new("/home/test");
+        // `~/.aws/*` should catch a path under the home dir even when spelled
+        // with an absolute path.
+        let globs = vec!["~/.aws/*".to_string()];
+        let (out, n) = redact_paths(
+            "the key is in /home/test/.aws/credentials, do not commit it",
+            &globs,
+            home,
+        );
+        assert!(out.contains("[redacted]"), "got {out}");
+        assert!(!out.contains("credentials"), "got {out}");
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn redact_paths_ignores_globs_that_do_not_match() {
+        let home = std::path::Path::new("/home/test");
+        let globs = vec!["src/**.env".to_string()];
+        let (out, n) = redact_paths("use .env.example for defaults", &globs, home);
+        assert_eq!(n, 0, "got {out}");
+        assert!(out.contains(".env.example"));
+    }
+
+    #[test]
+    fn glob_matching_handles_star_globstar_and_question() {
+        let home = std::path::Path::new("/home/test");
+        assert!(path_glob_match("*.pem", "key.pem", home));
+        assert!(path_glob_match("**/*.pem", "a/b/key.pem", home));
+        assert!(path_glob_match("src/?.rs", "src/a.rs", home));
+        assert!(
+            path_glob_match("*.pem", "a/b/key.pem", home),
+            "bare name matches trailing segment"
+        );
+        assert!(!path_glob_match("*.pem", "a/b/key.crt", home));
+        assert!(path_glob_match("**/.env", ".env", home));
     }
 
     #[test]

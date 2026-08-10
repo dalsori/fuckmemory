@@ -653,6 +653,47 @@ fn secrets_pasted_into_a_prompt_are_never_written_to_disk() {
 }
 
 #[test]
+fn ignore_paths_redact_file_references_from_autosaved_prompts() {
+    let home = scratch("ignore");
+    let proj = home.join("proj");
+    std::fs::write(proj.join(".env"), "AWS_ACCESS_KEY=secret\n").unwrap();
+    let env: &[(&str, &str)] = &[
+        ("FUCKMEMORY_AUTOSAVE", "1"),
+        ("FUCKMEMORY_IGNORE_PATHS", ".env,*.pem"),
+    ];
+
+    let (_, _, ok) = hook(
+        &home,
+        &["hook", "prompt", "--agent", "claude-code"],
+        &payload(&proj, "check the .env for the deploy key before starting"),
+        env,
+    );
+    assert!(ok);
+
+    let (dump, _, _) = run(&home, &["export"]);
+    assert!(
+        !dump.contains(".env"),
+        "the ignored path was stored: {dump}"
+    );
+    assert!(dump.contains("[redacted]"), "got {dump}");
+
+    // Unrelated paths survive.
+    std::fs::write(proj.join("main.rs"), "fn main() {}\n").unwrap();
+    let (_, _, ok) = hook(
+        &home,
+        &["hook", "prompt", "--agent", "claude-code"],
+        &payload(&proj, "read src/main.rs and fix the lint"),
+        env,
+    );
+    assert!(ok);
+    let (dump, _, _) = run(&home, &["export"]);
+    assert!(
+        dump.contains("main.rs"),
+        "unrelated path was redacted: {dump}"
+    );
+}
+
+#[test]
 fn the_session_end_hook_consolidates_instead_of_storing() {
     let home = scratch("session-end");
     run(&home, &["remember", "the api runs on fly.io"]);

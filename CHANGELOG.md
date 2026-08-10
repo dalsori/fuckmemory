@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Published on crates.io.** `cargo install fuckmemory` now works; docs.rs
+  builds the crate reference automatically.
+
 - **`fuckmemory bench` measures write and recall latency.** Seeds a throwaway
   store with N facts, then reports median write (`remember`) and recall timings
   with and without the embedding model, plus the steady-state "hot cache" number

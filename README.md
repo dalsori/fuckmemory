@@ -133,7 +133,14 @@ directly. Assets are named `fuckmemory-<target>.tar.gz` (Unix) or
 
 Then run `fuckmemory install` to wire your agents.
 
-Or build from source (needs Rust 1.85+ — `rustup` from https://rustup.rs):
+Or install from crates.io (needs Rust 1.85+ — `rustup` from https://rustup.rs):
+
+```bash
+cargo install fuckmemory
+fuckmemory install          # detect agents, register, download the model
+```
+
+Or build from source:
 
 ```bash
 git clone https://github.com/dalsori/fuckmemory && cd fuckmemory
@@ -149,6 +156,7 @@ fuckmemory install          # detect agents, register, download the model
 
 `cargo install` drops the binary in `~/.cargo/bin`; `install.sh` uses
 `~/.local/bin` and removes the `~/.cargo/bin` copy so the two never drift apart.
+`cargo install fuckmemory` is the same thing but pulls the published crate.
 
 `install` is idempotent, backs up every file it edits, and `fuckmemory uninstall`
 reverses it. Add `--dry-run` to see the plan first.

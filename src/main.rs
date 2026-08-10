@@ -2,10 +2,10 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use fuckmemory::config::{now, Config};
-use fuckmemory::embed::Embedder;
+use fuckmemory::embed::{Embedder, VecCache};
 use fuckmemory::graph::When;
 use fuckmemory::install::{self, What};
 use fuckmemory::pack::{self, PackOptions};
@@ -180,6 +180,18 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Benchmark write and recall latency on a throwaway store
+    Bench {
+        /// Number of facts to seed the store with
+        #[arg(long, default_value_t = 10_000)]
+        facts: usize,
+        /// How many timing rounds to run per measurement
+        #[arg(long, default_value_t = 20)]
+        rounds: usize,
+        /// Queries to run per round
+        #[arg(long, default_value_t = 10)]
+        queries: usize,
+    },
     /// List memory scopes
     Scopes,
     /// Check the install: paths, model, schema, registrations
@@ -324,6 +336,11 @@ fn run() -> Result<()> {
             scope,
         } => cmd_timeline(&cfg, entity, limit, scope),
         Cmd::Stats { json } => cmd_stats(&cfg, json),
+        Cmd::Bench {
+            facts,
+            rounds,
+            queries,
+        } => cmd_bench(&cfg, facts, rounds, queries),
         Cmd::Scopes => cmd_scopes(&cfg),
         Cmd::Doctor { fix } => cmd_doctor(&cfg, fix),
         Cmd::Consolidate { limit } => cmd_consolidate(&cfg, limit),
@@ -1044,6 +1061,165 @@ fn cmd_stats(cfg: &Config, json: bool) -> Result<()> {
     println!("vectors         {}", s.vectors);
     println!("unconsolidated  {}", s.pending);
     println!("db size         {:.1} KiB", s.db_bytes as f64 / 1024.0);
+    Ok(())
+}
+
+/// Median of a sorted slice of microseconds.
+fn median_us(v: &[u128]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let mut s = v.to_vec();
+    s.sort_unstable();
+    let n = s.len();
+    if n % 2 == 1 {
+        s[n / 2] as f64
+    } else {
+        (s[n / 2 - 1] + s[n / 2]) as f64 / 2.0
+    }
+}
+
+/// Benchmark write and recall latency on a throwaway store, so the numbers in
+/// the README are reproducible rather than remembered.
+///
+/// Seeding happens in-process; write latency is measured per `remember` after
+/// the store is populated, and recall latency is measured across a set of
+/// queries that are known to hit. Everything runs against a temporary database
+/// in the system temp dir — your real store is never touched.
+fn cmd_bench(cfg: &Config, facts: usize, rounds: usize, queries: usize) -> Result<()> {
+    use std::time::Instant;
+
+    let dir = std::env::temp_dir().join(format!("fuckmemory-bench-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let db_path = dir.join("bench.db");
+
+    let mut conn = db::open(&db_path)?;
+    let sc = scope::resolve(&conn, Some("bench"), Path::new("/"))?;
+    let emb = match cfg.semantic {
+        true => Some(Embedder::load(cfg)?),
+        false => None,
+    };
+    let emb_ref = emb.as_ref();
+
+    println!(
+        "benchmark: {} facts, {} rounds, {} queries/round",
+        facts, rounds, queries
+    );
+    println!(
+        "semantic:  {}",
+        if emb_ref.is_some() { "on" } else { "off" }
+    );
+    println!("seed:      {} fact(s)…", facts);
+
+    let t0 = Instant::now();
+    for i in 0..facts {
+        store::remember(
+            &mut conn,
+            &sc,
+            emb_ref,
+            &RememberInput {
+                text: format!("fact number {} uses the f{i} word and builds things", i),
+                kind: "note".into(),
+                source: "bench".into(),
+                facts: vec![],
+                files: vec![],
+                meta: None,
+                derive: true,
+            },
+        )?;
+    }
+    let seed_us = t0.elapsed().as_micros();
+
+    // A known-hit query pool, so recall latency measures real work rather than
+    // empty result sets.
+    let queries_pool: Vec<String> = (0..queries.max(1))
+        .map(|q| format!("how does fact number {q} build things"))
+        .collect();
+    let scope_ids = scope::read_set(&conn, &sc)?;
+
+    let mut write_us = Vec::new();
+    for i in 0..rounds {
+        let t = Instant::now();
+        store::remember(
+            &mut conn,
+            &sc,
+            emb_ref,
+            &RememberInput {
+                text: format!("a fresh benchmark observation number {i}"),
+                kind: "note".into(),
+                source: "bench".into(),
+                facts: vec![],
+                files: vec![],
+                meta: None,
+                derive: true,
+            },
+        )?;
+        write_us.push(t.elapsed().as_micros());
+    }
+
+    let mut recall_us = Vec::new();
+    for _ in 0..rounds {
+        let t = Instant::now();
+        for q in &queries_pool {
+            retrieve::recall(
+                &conn,
+                &scope_ids,
+                emb_ref,
+                &Query {
+                    text: q.clone(),
+                    limit: 6,
+                    ..Default::default()
+                },
+                None,
+            )?;
+        }
+        recall_us.push(t.elapsed().as_micros() / queries.max(1) as u128);
+    }
+
+    // A second pass over the same store to show steady-state recall cost.
+    let mut hot_recall_us = Vec::new();
+    let cache = &mut VecCache::new();
+    for _ in 0..rounds {
+        let t = Instant::now();
+        for q in &queries_pool {
+            retrieve::recall(
+                &conn,
+                &scope_ids,
+                emb_ref,
+                &Query {
+                    text: q.clone(),
+                    limit: 6,
+                    ..Default::default()
+                },
+                Some(cache),
+            )?;
+        }
+        hot_recall_us.push(t.elapsed().as_micros() / queries.max(1) as u128);
+    }
+
+    println!(
+        "seed       {:>7} ms total ({:.2} ms/fact)",
+        seed_us / 1000,
+        seed_us as f64 / 1000.0 / facts.max(1) as f64
+    );
+    println!(
+        "write      {:>7} µs median  (min {} · max {})",
+        median_us(&write_us) as u64,
+        write_us.iter().min().unwrap_or(&0),
+        write_us.iter().max().unwrap_or(&0),
+    );
+    println!(
+        "recall     {:>7} µs median  (min {} · max {})",
+        median_us(&recall_us) as u64,
+        recall_us.iter().min().unwrap_or(&0),
+        recall_us.iter().max().unwrap_or(&0),
+    );
+    println!(
+        "recall hot {:>7} µs median  (in-process vector cache)",
+        median_us(&hot_recall_us) as u64,
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
 

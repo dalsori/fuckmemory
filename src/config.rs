@@ -45,6 +45,10 @@ pub struct Config {
     pub autosave_scope: String,
     /// Drop text that looks like a credential instead of storing it.
     pub redact: bool,
+    /// Glob patterns of files/paths whose content should be redacted from
+    /// autosaved prompts, e.g. `.env`, `*.pem`, `~/.aws/*`. Empty means the
+    /// heuristic token redaction is all there is.
+    pub ignore_paths: Vec<String>,
 
     /// Inject relevant memories into each prompt automatically, so recall happens
     /// even when the agent doesn't think to ask.
@@ -71,6 +75,7 @@ impl Default for Config {
             autosave_facts: true,
             autosave_scope: "project".into(),
             redact: true,
+            ignore_paths: Vec::new(),
             autorecall: false,
             autorecall_limit: 6,
             autorecall_budget: 600,
@@ -200,6 +205,18 @@ impl Config {
                 self.autorecall_budget = v.max(0) as usize;
             }
         }
+        if let Some(t) = table("ignore") {
+            if let Some(v) = t.get("paths").and_then(|v| v.as_array()) {
+                let paths: Vec<String> = v
+                    .iter()
+                    .filter_map(|p| p.as_str().map(str::to_string))
+                    .filter(|p| !p.trim().is_empty())
+                    .collect();
+                if !paths.is_empty() {
+                    self.ignore_paths = paths;
+                }
+            }
+        }
     }
 
     fn apply_env(&mut self) {
@@ -235,6 +252,18 @@ impl Config {
         }
         if let Some(v) = on("FUCKMEMORY_REDACT", "autosave.redact", &mut locked) {
             self.redact = v;
+        }
+        if let Some(v) = env_string("FUCKMEMORY_IGNORE_PATHS") {
+            let paths: Vec<String> = v
+                .split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect();
+            if !paths.is_empty() {
+                self.ignore_paths = paths;
+                locked.push("ignore.paths");
+            }
         }
         self.env_locked = locked;
     }
@@ -278,6 +307,18 @@ impl Config {
         doc["autorecall"]["limit"] = toml_edit::value(self.autorecall_limit as i64);
         doc["autorecall"]["budget_tokens"] = toml_edit::value(self.autorecall_budget as i64);
 
+        if !self.ignore_paths.is_empty() {
+            if !doc
+                .get("ignore")
+                .map(|t| t.is_table_like())
+                .unwrap_or(false)
+            {
+                doc["ignore"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            let arr = toml_edit::Array::from_iter(self.ignore_paths.iter().cloned());
+            doc["ignore"]["paths"] = toml_edit::value(arr);
+        }
+
         // Temp file + rename: several agents may be reading this concurrently.
         let tmp = path.with_extension(format!("toml.tmp-{}", std::process::id()));
         std::fs::write(&tmp, doc.to_string())
@@ -309,10 +350,14 @@ pub const DAY: i64 = 86_400_000;
 ///
 /// Monotonicity is per process. Two agents writing in the same millisecond can
 /// still collide, but at that point their relative order is genuinely undefined.
+/// The user's home directory, used to expand `~` in ignore patterns.
+pub fn home_dir() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+}
+
 pub fn now() -> i64 {
     use std::sync::atomic::{AtomicI64, Ordering};
     static LAST: AtomicI64 = AtomicI64::new(0);
-
     let wall = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
@@ -444,5 +489,45 @@ mod tests {
         // load() swallows it; defaults survive.
         cfg.apply_env();
         assert_eq!(cfg.model, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn ignore_paths_come_from_env_and_toml() {
+        let home = tmp_home("ignore");
+        let mut cfg = Config {
+            home: home.clone(),
+            ..Default::default()
+        };
+        // Env.
+        unsafe { std::env::set_var("FUCKMEMORY_IGNORE_PATHS", ".env, *.pem") };
+        cfg.apply_env();
+        assert_eq!(
+            cfg.ignore_paths,
+            vec![".env".to_string(), "*.pem".to_string()]
+        );
+        assert!(cfg.env_locked.contains(&"ignore.paths"));
+
+        // Toml wins over the default, env still wins over toml (apply_env runs
+        // last in load()).
+        std::fs::write(
+            home.join(CONFIG_FILE),
+            "[ignore]\npaths = [\"secret.txt\"]\n",
+        )
+        .unwrap();
+        let mut cfg2 = Config {
+            home,
+            ..Default::default()
+        };
+        if let Ok(Some(doc)) = cfg2.read_file() {
+            cfg2.apply_file(&doc);
+        }
+        assert_eq!(cfg2.ignore_paths, vec!["secret.txt".to_string()]);
+        cfg2.apply_env();
+        assert_eq!(
+            cfg2.ignore_paths,
+            vec![".env".to_string(), "*.pem".to_string()]
+        );
+
+        unsafe { std::env::remove_var("FUCKMEMORY_IGNORE_PATHS") };
     }
 }

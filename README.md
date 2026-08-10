@@ -293,6 +293,9 @@ them relies on the model calling the MCP tools.
 - **Acknowledgements are dropped.** "ok", "sí", "continue", `/compact`.
 - **Credentials never reach the disk.** Tokens with known prefixes, assignments
   to secret-ish keys and opaque blobs are replaced with `[redacted]` first.
+- **Sensitive files are ignored by name.** Add globs to `[ignore] paths`
+  (`.env`, `*.pem`, `~/.aws/*`) and any prompt naming a matching file is
+  redacted too — even when the path itself carries no recognizable token.
 - **Nothing is paraphrased.** No model runs in this path either, so the stored
   text is exactly what you typed, minus redactions.
 
@@ -537,6 +540,9 @@ redact = true
 enabled = true
 limit = 6
 budget_tokens = 600
+
+[ignore]
+paths = [".env", "*.pem", "~/.aws/*"]   # redact prompts naming these files
 ```
 
 | Variable | Default | Meaning |
@@ -549,6 +555,7 @@ budget_tokens = 600
 | `FUCKMEMORY_AUTOSAVE` | off | `1` to store every prompt |
 | `FUCKMEMORY_AUTORECALL` | off | `1` to inject memories into every prompt |
 | `FUCKMEMORY_REDACT` | on | `0` to store prompts unfiltered |
+| `FUCKMEMORY_IGNORE_PATHS` | — | comma-separated globs of files to redact |
 
 The default model is **125 MB** on disk (32M parameters in f32).
 `FUCKMEMORY_MODEL=minishlab/potion-base-8M` is ~4x smaller and loads ~4x faster,
@@ -600,13 +607,14 @@ fuckmemory consolidate && fuckmemory prune --days 90
   without any of the markers ("the replica lags by an hour") is kept as an
   episode, not promoted to a fact. Recall reads facts; `recall --raw` reads both.
 - **Redaction is heuristic.** It catches known token formats, assignments to
-  secret-ish keys and opaque blobs. A password that looks like an English word
-  will survive it, so it is a safety net, not a guarantee.
+  secret-ish keys and opaque blobs, plus any path matching an `[ignore]` glob.
+  A password that looks like an English word in a file you did not list will
+  survive it, so it is a safety net, not a guarantee.
 
 ## Development
 
 ```bash
-cargo test                  # 161 tests: 140 unit, 21 integration
+cargo test                  # 170 tests: 148 unit, 22 integration
 cargo build --release
 ```
 

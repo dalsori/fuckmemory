@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Published on crates.io.** `cargo install fuckmemory` now works; docs.rs
   builds the crate reference automatically.
+- **Ignore sensitive paths.** `[ignore] paths = [".env", "*.pem", "~/.aws/*"]`
+  (or `FUCKMEMORY_IGNORE_PATHS`, comma-separated) redacts any prompt that names
+  a matching file — globs support `*`, `**` and `?`, with `~` home expansion.
+  Runs after the token redaction, so a path that no token rule would catch is
+  still scrubbed from what autosave stores.
 
 - **`fuckmemory bench` measures write and recall latency.** Seeds a throwaway
   store with N facts, then reports median write (`remember`) and recall timings

@@ -57,6 +57,8 @@ impl Event {
             | "submit"
             | "beforeagent"
             | "before-agent"
+            | "preinvocation"
+            | "pre-invocation"
             | "beforesubmitprompt"
             | "before-submit-prompt" => Some(Self::Prompt),
             "session-end" | "sessionend" | "session-ended" | "stop" | "end" => {
@@ -101,6 +103,67 @@ pub fn prompt_from_stdin(raw: &str) -> (Option<String>, Value) {
             (text, v)
         }
         _ => (Some(trimmed.to_string()), json!({})),
+    }
+}
+
+/// `prompt_from_stdin`, with an agent-specific fallback.
+///
+/// Antigravity's `PreInvocation` payload never carries the prompt text itself —
+/// it points at the conversation's `transcriptPath` instead. The transcript is a
+/// JSONL where each user turn is recorded as a `USER_INPUT` entry whose `content`
+/// wraps the prompt in `<USER_REQUEST>…</USER_REQUEST>` tags, so we read the file
+/// and take the most recent one. Any failure returns `None`: a hook must never
+/// break the agent it runs inside.
+pub fn prompt_from_agent(raw: &str, agent: &str) -> (Option<String>, Value) {
+    let (text, meta) = prompt_from_stdin(raw);
+    if text.is_some() || agent != "antigravity" {
+        return (text, meta);
+    }
+    let Some(path) = meta.get("transcriptPath").and_then(Value::as_str) else {
+        return (None, meta);
+    };
+    let path = expand_tilde(path);
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return (None, meta);
+    };
+    let prompt = content.lines().rev().find_map(antigravity_user_request);
+    (prompt, meta)
+}
+
+/// Expand a leading `~` to the home directory, like the shell would.
+fn expand_tilde(p: &str) -> std::path::PathBuf {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+    std::path::PathBuf::from(p)
+}
+
+/// Extract the `<USER_REQUEST>…</USER_REQUEST>` body from one transcript line,
+/// if that line is a user turn.
+fn antigravity_user_request(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("USER_INPUT") {
+        return None;
+    }
+    let content = v.get("content").and_then(Value::as_str)?;
+    const OPEN: &str = "<USER_REQUEST>";
+    const CLOSE: &str = "</USER_REQUEST>";
+    let start = content.find(OPEN)?;
+    let end = content.find(CLOSE)?;
+    if end <= start + OPEN.len() {
+        return None;
+    }
+    let req = content[start + OPEN.len()..end].trim();
+    if req.is_empty() {
+        None
+    } else {
+        Some(req.to_string())
     }
 }
 
@@ -650,7 +713,22 @@ fn looks_secret(word: &str) -> bool {
 /// Returns `None` for agents whose hook channel cannot carry context — Cursor
 /// `beforeSubmitPrompt` is informational-only, and Copilot CLI ignores the
 /// output of `userPromptSubmitted` entirely — so printing anything there is noise.
+///
+/// Antigravity has its own channel: it injects steps into the trajectory, and the
+/// only way to add prose is an `ephemeralMessage` inside `injectSteps`. Its `Stop`
+/// event also demands a JSON `decision` back, so the session-end reply is
+/// `{"decision": "allow"}` — we never want to force the loop to continue.
 pub fn hook_output(agent: &str, event: Event, context: &str) -> Option<Value> {
+    if agent == "antigravity" {
+        return match event {
+            Event::Prompt => Some(json!({
+                "injectSteps": [
+                    { "ephemeralMessage": context }
+                ]
+            })),
+            Event::SessionEnd => Some(json!({ "decision": "allow" })),
+        };
+    }
     if matches!(agent, "cursor" | "copilot-cli") {
         return None;
     }
@@ -685,6 +763,66 @@ mod tests {
         assert_eq!(text.as_deref(), Some("we use pnpm"));
         assert_eq!(meta["session_id"], "abc");
         assert_eq!(meta["cwd"], "/tmp/x");
+    }
+
+    #[test]
+    fn antigravity_preinvocation_reads_prompt_from_transcript() {
+        let dir = std::env::temp_dir().join(format!("fm-agy-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".system_generated/logs")).unwrap();
+        let transcript = dir.join(".system_generated/logs/transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"SYSTEM\",\"content\":\"<SYSTEM_INSTRUCTION>boot</SYSTEM_INSTRUCTION>\"}\n",
+                "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>we use pnpm for everything</USER_REQUEST>\"}\n",
+                "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>second turn</USER_REQUEST>\"}\n",
+            ),
+        )
+        .unwrap();
+        let payload = json!({
+            "invocationNum": 0,
+            "transcriptPath": transcript.to_str().unwrap(),
+        });
+        let (text, meta) = prompt_from_agent(&payload.to_string(), "antigravity");
+        assert_eq!(text.as_deref(), Some("second turn"), "take the most recent");
+        assert_eq!(meta["invocationNum"], 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn antigravity_missing_transcript_yields_no_prompt() {
+        let payload = json!({ "invocationNum": 0, "transcriptPath": "/nonexistent/x.jsonl" });
+        let (text, _) = prompt_from_agent(&payload.to_string(), "antigravity");
+        assert_eq!(text, None, "a missing transcript must not error");
+    }
+
+    #[test]
+    fn antigravity_without_transcript_path_falls_back_to_stdin_keys() {
+        let payload = json!({ "prompt": "plain prompt works too", "invocationNum": 2 });
+        let (text, _) = prompt_from_agent(&payload.to_string(), "antigravity");
+        assert_eq!(text.as_deref(), Some("plain prompt works too"));
+    }
+
+    #[test]
+    fn antigravity_prompt_reads_latest_user_request_even_with_tool_noise() {
+        let dir = std::env::temp_dir().join(format!("fm-agy2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("transcript.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>first</USER_REQUEST>\"}\n",
+                "{\"type\":\"TOOL_USE\",\"content\":\"<TOOL>ls</TOOL>\"}\n",
+                "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>now make the tests pass</USER_REQUEST>\"}\n",
+            ),
+        )
+        .unwrap();
+        let payload = json!({ "transcriptPath": transcript.to_str().unwrap() });
+        let (text, _) = prompt_from_agent(&payload.to_string(), "antigravity");
+        assert_eq!(text.as_deref(), Some("now make the tests pass"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -812,9 +950,28 @@ mod tests {
         assert_eq!(Event::parse("BeforeAgent"), Some(Event::Prompt));
         assert_eq!(Event::parse("beforeSubmitPrompt"), Some(Event::Prompt));
         assert_eq!(Event::parse("userPromptSubmitted"), Some(Event::Prompt));
+        assert_eq!(Event::parse("PreInvocation"), Some(Event::Prompt));
         assert_eq!(Event::parse("SessionEnd"), Some(Event::SessionEnd));
         assert_eq!(Event::parse("sessionEnd"), Some(Event::SessionEnd));
         assert_eq!(Event::parse("stop"), Some(Event::SessionEnd));
         assert_eq!(Event::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn antigravity_output_injects_ephemeral_message() {
+        let v = hook_output("antigravity", Event::Prompt, "remember: pnpm").unwrap();
+        assert_eq!(v["injectSteps"][0]["ephemeralMessage"], "remember: pnpm");
+    }
+
+    #[test]
+    fn antigravity_stop_always_replies_with_a_decision() {
+        let v = hook_output("antigravity", Event::SessionEnd, "").unwrap();
+        assert_eq!(v["decision"], "allow");
+    }
+
+    #[test]
+    fn cursor_and_copilot_never_get_output() {
+        assert!(hook_output("cursor", Event::Prompt, "x").is_none());
+        assert!(hook_output("copilot-cli", Event::Prompt, "x").is_none());
     }
 }

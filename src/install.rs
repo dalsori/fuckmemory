@@ -80,6 +80,12 @@ pub enum HookFormat {
     /// GitHub Copilot CLI's `hooks/*.json`: flat, events in camelCase, and each
     /// entry carries `bash`/`powershell` keys instead of `command`.
     Copilot,
+    /// Antigravity's `hooks.json`: a *named map* — the top level maps our hook
+    /// name to per-event arrays, `{ "<name>": { "<Event>": [{type, command}] } }`.
+    /// It lives at `~/.gemini/config/hooks.json` (global) or `.agents/hooks.json`
+    /// (workspace). Its prompt event is `PreInvocation`; the loop end is `Stop`.
+    /// Timeout is in seconds.
+    Antigravity,
 }
 
 pub struct Agent {
@@ -160,8 +166,11 @@ pub const AGENTS: &[Agent] = &[
         format: Format::McpServers,
         project_instructions: "AGENTS.md",
         global_instructions: None,
-        hooks: None,
-        project_hooks: None,
+        // Antigravity reads hooks from `~/.gemini/config/hooks.json` (global) or
+        // `.agents/hooks.json` (workspace), in a named-map shape with
+        // PreInvocation/Stop events and a seconds timeout.
+        hooks: Some((".gemini/config/hooks.json", HookFormat::Antigravity)),
+        project_hooks: Some(".agents/hooks.json"),
     },
     Agent {
         id: "opencode",
@@ -320,6 +329,7 @@ impl HookFormat {
         match self {
             HookFormat::Anthropic | HookFormat::Cursor | HookFormat::Copilot => 10,
             HookFormat::QwenSettings | HookFormat::GeminiSettings => 10_000,
+            HookFormat::Antigravity => 10,
         }
     }
 
@@ -331,6 +341,7 @@ impl HookFormat {
             HookFormat::GeminiSettings => HOOK_EVENTS_GEMINI,
             HookFormat::Cursor => HOOK_EVENTS_CURSOR,
             HookFormat::Copilot => HOOK_EVENTS_COPILOT,
+            HookFormat::Antigravity => HOOK_EVENTS_ANTIGRAVITY,
         }
     }
 
@@ -415,6 +426,12 @@ const HOOK_EVENTS_COPILOT: &[(&str, &str)] = &[
     ("sessionEnd", "session-end"),
 ];
 
+/// Antigravity's lifecycle events. `PreInvocation` fires before each model call
+/// (the first one is the user's freshly-submitted prompt); `Stop` fires when the
+/// execution loop terminates — Antigravity has no `SessionEnd`.
+const HOOK_EVENTS_ANTIGRAVITY: &[(&str, &str)] =
+    &[("PreInvocation", "prompt"), ("Stop", "session-end")];
+
 /// The events autosave listens on, paired with the `fuckmemory hook` argument
 /// each one maps to.
 pub const HOOK_EVENTS: &[(&str, &str)] = EVENTS_PASCAL;
@@ -466,10 +483,10 @@ fn patch_hooks(
     dry_run: bool,
     remove: bool,
 ) -> Result<What> {
-    if format.grouped() {
-        patch_grouped(path, command, agent, format, dry_run, remove)
-    } else {
-        patch_flat(path, command, agent, format, dry_run, remove)
+    match format {
+        HookFormat::Antigravity => patch_named(path, command, agent, format, dry_run, remove),
+        _ if format.grouped() => patch_grouped(path, command, agent, format, dry_run, remove),
+        _ => patch_flat(path, command, agent, format, dry_run, remove),
     }
 }
 
@@ -744,6 +761,112 @@ fn patch_flat(
             .unwrap_or(false)
     {
         root.as_object_mut().unwrap().remove("hooks");
+    }
+    if !changed {
+        return Ok(What::AlreadyDone);
+    }
+    if had_comments {
+        eprintln!(
+            "fuckmemory: {} contained comments; they are not preserved (backup kept alongside)",
+            path.display()
+        );
+    }
+    if !dry_run {
+        backup(path, dry_run)?;
+        write_atomic(path, &format!("{}\n", serde_json::to_string_pretty(&root)?))?;
+    }
+    Ok(if remove {
+        What::RemoveHooks
+    } else {
+        What::WriteHooks
+    })
+}
+
+/// Patch Antigravity's named-map shape, `{ "<name>": { "<Event>": [handlers] } }`.
+///
+/// Antigravity maps a *hook name* (ours is `SERVER_NAME`) to per-event arrays of
+/// `{type, command, timeout}` handlers, with no group wrapper and no matcher for
+/// the lifecycle events we use (`PreInvocation`, `Stop`). The file belongs to the
+/// user and may hold other tools' hooks too, so this edits surgically under our
+/// own key — entries are matched by the `fuckmemory hook` command prefix, and
+/// everything else is left exactly as found. Timeout is in seconds.
+fn patch_named(
+    path: &Path,
+    command: &str,
+    agent: &str,
+    format: HookFormat,
+    dry_run: bool,
+    remove: bool,
+) -> Result<What> {
+    let (mut root, had_comments) = read_json(path)?;
+    if !root.is_object() {
+        anyhow::bail!(
+            "{} has a non-object top level; refusing to touch it",
+            path.display()
+        );
+    }
+    let mut changed = false;
+
+    if remove && root.get(SERVER_NAME).is_none() {
+        return Ok(What::AlreadyDone);
+    }
+
+    for (event, arg) in format.events() {
+        let marker = format!(" {HOOK_TAG} {arg} --agent ");
+        let is_ours = |entry: &Value| -> bool {
+            entry
+                .get("command")
+                .and_then(Value::as_str)
+                .map(|c| c.contains(&marker))
+                .unwrap_or(false)
+        };
+        let desired = json!({
+            "type": "command",
+            "command": hook_command(command, agent, arg),
+            "timeout": format.timeout()
+        });
+
+        if !root.get(SERVER_NAME).map(Value::is_object).unwrap_or(false) {
+            if remove {
+                continue;
+            }
+            root[SERVER_NAME] = json!({});
+        }
+        let ours = root.get_mut(SERVER_NAME).unwrap().as_object_mut().unwrap();
+        if !ours.get(*event).map(Value::is_array).unwrap_or(false) {
+            if remove {
+                continue;
+            }
+            ours.insert((*event).to_string(), json!([]));
+        }
+        let list = ours.get_mut(*event).unwrap().as_array_mut().unwrap();
+
+        if remove {
+            let before = list.len();
+            list.retain(|e| !is_ours(e));
+            changed |= list.len() != before;
+            if list.is_empty() {
+                ours.remove(*event);
+            }
+        } else if let Some(slot) = list.iter_mut().find(|e| is_ours(e)) {
+            if *slot != desired {
+                *slot = desired;
+                changed = true;
+            }
+        } else {
+            list.push(desired);
+            changed = true;
+        }
+    }
+
+    if remove
+        && root
+            .get(SERVER_NAME)
+            .and_then(Value::as_object)
+            .map(|o| o.is_empty())
+            .unwrap_or(false)
+    {
+        root.as_object_mut().unwrap().remove(SERVER_NAME);
     }
     if !changed {
         return Ok(What::AlreadyDone);
@@ -1596,6 +1719,69 @@ mod tests {
 
         let undo = apply_hooks(&home, &base, true).unwrap();
         assert!(undo.iter().any(|c| c.what == What::RemoveHooks));
+    }
+
+    /// Antigravity uses a named-map shape (`{"<name>": {"<Event>": [...]}}`) with
+    /// `PreInvocation`/`Stop` events and a seconds timeout, written under our own
+    /// hook name so a user's other hooks survive.
+    #[test]
+    fn antigravity_hooks_use_named_map_with_preinvocation_and_stop() {
+        let home = tmpdir("hooks-antigravity");
+        std::fs::create_dir_all(home.join(".gemini/config")).unwrap();
+        let base = Options {
+            command: "/bin/fm".into(),
+            global: true,
+            project: None,
+            only: Some(vec!["antigravity".into()]),
+            instructions: false,
+            hooks: true,
+            dry_run: false,
+        };
+
+        apply_hooks(&home, &base, false).unwrap();
+        let v: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".gemini/config/hooks.json")).unwrap(),
+        )
+        .unwrap();
+        let ours = &v["fuckmemory"];
+        assert!(ours.get("PreInvocation").is_some());
+        assert!(ours.get("Stop").is_some());
+        assert!(
+            ours.get("SessionEnd").is_none(),
+            "antigravity has no SessionEnd"
+        );
+        let entry = &ours["PreInvocation"][0];
+        assert_eq!(entry["type"], "command");
+        assert_eq!(
+            entry["timeout"], 10,
+            "antigravity measures timeout in seconds"
+        );
+        assert!(
+            entry["command"]
+                .as_str()
+                .unwrap()
+                .contains("hook prompt --agent antigravity"),
+            "got {entry}"
+        );
+        assert!(v["fuckmemory"]["Stop"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("hook session-end --agent antigravity"));
+
+        let again = apply_hooks(&home, &base, false).unwrap();
+        assert!(
+            again.iter().all(|c| c.what == What::AlreadyDone),
+            "second run should be a no-op: {again:?}"
+        );
+
+        let undo = apply_hooks(&home, &base, true).unwrap();
+        assert!(undo.iter().any(|c| c.what == What::RemoveHooks));
+        assert!(
+            !std::fs::read_to_string(home.join(".gemini/config/hooks.json"))
+                .unwrap()
+                .contains("fuckmemory"),
+            "uninstall must clear our hook name"
+        );
     }
 
     /// Cursor keeps a flat `{command, timeout}` array per event with a `version`

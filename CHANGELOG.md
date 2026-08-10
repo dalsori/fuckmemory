@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Antigravity autosave + auto-recall.** `install --autosave` now also wires
+  hooks into Antigravity CLI (`~/.gemini/config/hooks.json` and
+  `.agents/hooks.json`, `PreInvocation`/`Stop` events, named-map shape). Its
+  prompt event does not carry the prompt text, so `hook prompt` reads the most
+  recent user request back from the conversation transcript, and context is
+  injected as an `ephemeralMessage` step.
+
 ### Changed
 
 - **Multi-platform release builds.** GitHub Actions now builds prebuilt binaries

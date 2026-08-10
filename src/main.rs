@@ -620,7 +620,7 @@ fn cmd_hook(
         Some(t) => Some(t),
         None => {
             std::io::stdin().read_to_string(&mut raw).ok();
-            let (t, m) = fuckmemory::hook::prompt_from_stdin(&raw);
+            let (t, m) = fuckmemory::hook::prompt_from_agent(&raw, &agent);
             meta = m;
             t
         }
@@ -628,13 +628,21 @@ fn cmd_hook(
 
     match fuckmemory::hook::run(cfg, ev, text, &meta, &agent) {
         Ok(out) => {
-            if let Some(ctx) = &out.context {
-                // Claude Code, Codex, Qwen and Gemini read this JSON and append
-                // `additionalContext` to the prompt. Agents whose hook channel
-                // can't carry context back (Cursor, Copilot CLI) print nothing.
+            // Antigravity's `Stop` requires a JSON `decision` back, and its
+            // `PreInvocation` wants a valid `injectSteps` object — so it always
+            // gets a reply, even when there is nothing to inject. The other
+            // agents only read our output when we actually have context.
+            let ctx = out.context.as_deref().unwrap_or("");
+            if agent == "antigravity" {
                 if let Some(v) = fuckmemory::hook::hook_output(&agent, ev, ctx) {
                     println!("{v}");
                 }
+            } else if let Some(v) = out
+                .context
+                .as_deref()
+                .and_then(|c| fuckmemory::hook::hook_output(&agent, ev, c))
+            {
+                println!("{v}");
             }
             if verbose {
                 eprintln!("fuckmemory: {out:?}");

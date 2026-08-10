@@ -200,7 +200,7 @@ second one the tools exist and nothing ever calls them.
 | Claude Code | `~/.claude.json`, `./.mcp.json` | `CLAUDE.md` | `./.claude/settings.json` |
 | OpenAI Codex CLI | `~/.codex/config.toml` | `AGENTS.md` | `./.codex/hooks.json` |
 | Gemini CLI | `~/.gemini/settings.json` | `AGENTS.md` | `./.gemini/settings.json` |
-| Antigravity CLI | `~/.gemini/config/mcp_config.json`, `./.agents/mcp_config.json` | `AGENTS.md` | — |
+| Antigravity CLI | `~/.gemini/config/mcp_config.json`, `./.agents/mcp_config.json` | `AGENTS.md` | `~/.gemini/config/hooks.json`, `./.agents/hooks.json` |
 | OpenCode | `~/.config/opencode/opencode.json[c]` | `AGENTS.md` | — |
 | Qwen Code | `~/.qwen/settings.json` | `AGENTS.md` | `./.qwen/settings.json` |
 | Cursor | `~/.cursor/mcp.json` | `AGENTS.md` | `./.cursor/hooks.json` |
@@ -213,8 +213,8 @@ The instruction block lives between `<!-- fuckmemory:begin -->` and
 and never duplicates or clobbers what you wrote around it.
 
 With `--autosave`, it also writes hooks into the agents that support them
-(Claude Code, OpenAI Codex CLI, Gemini CLI, Qwen Code, Cursor, Copilot CLI) —
-see below.
+(Claude Code, OpenAI Codex CLI, Gemini CLI, Antigravity CLI, Qwen Code, Cursor,
+Copilot CLI) — see below.
 
 Everything the tool writes lives in one directory you can delete:
 `~/.local/share/fuckmemory` (override with `FUCKMEMORY_HOME`).
@@ -231,13 +231,15 @@ Anthropic JSON shape used by Claude Code (`settings.json`), Codex
 (`hooks.json`) and Gemini CLI (`settings.json`); only the `timeout` unit differs
 (seconds for Claude Code and Codex, milliseconds for Qwen and Gemini). Cursor
 and Copilot CLI use their own flat `hooks.json` shapes (`bash` keys, camelCase
-events). Agents without a verified hook format are left alone rather than
-guessed at.
+events). Antigravity uses a named-map `hooks.json` with `PreInvocation`/`Stop`
+events, and since its prompt event only points at the conversation transcript,
+the prompt is read back from there. Agents without a verified hook format are
+left alone rather than guessed at.
 
 Recall-injection only happens where the hook channel can carry context back
-(Claude Code, Codex, Qwen, Gemini); Cursor and Copilot CLI autosave every
-prompt but their hooks do not accept injected context, so autorecall for them
-relies on the model calling the MCP tools.
+(Claude Code, Codex, Qwen, Gemini, Antigravity); Cursor and Copilot CLI autosave
+every prompt but their hooks do not accept injected context, so autorecall for
+them relies on the model calling the MCP tools.
 
 - **Every prompt is kept**, verbatim, as a searchable episode. Nothing is lost.
 - **Only prompts that read like durable knowledge become facts.** "never force

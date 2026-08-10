@@ -11,7 +11,7 @@ use fuckmemory::install::{self, What};
 use fuckmemory::pack::{self, PackOptions};
 use fuckmemory::retrieve::{self, Query};
 use fuckmemory::store::{self, FactInput, RememberInput};
-use fuckmemory::{consolidate, db, graph, mcp, scope};
+use fuckmemory::{consolidate, db, graph, mcp, scope, update};
 
 #[derive(Parser)]
 #[command(
@@ -140,6 +140,15 @@ enum Cmd {
         query: Vec<String>,
         #[arg(long)]
         scope: Option<String>,
+    },
+    /// Check for and apply the latest release
+    Update {
+        /// Report what's available without downloading anything
+        #[arg(long)]
+        check: bool,
+        /// Re-download and replace even when already up to date
+        #[arg(long)]
+        force: bool,
     },
     /// Retract a memory (soft by default)
     Forget {
@@ -292,6 +301,7 @@ fn run() -> Result<()> {
             &cfg, query, limit, scope, as_of, hops, budget, raw, debug, json,
         ),
         Cmd::Explain { query, scope } => cmd_explain(&cfg, query, scope),
+        Cmd::Update { check, force } => cmd_update(check, force),
         Cmd::Forget {
             id,
             query,
@@ -650,6 +660,34 @@ fn cmd_hook(
         }
         Err(e) => eprintln!("fuckmemory: hook failed, continuing anyway: {e:#}"),
     }
+    Ok(())
+}
+fn cmd_update(check_only: bool, force: bool) -> Result<()> {
+    let check = update::latest_release()?;
+    if !check.update_available && !force {
+        println!(
+            "fuckmemory {} is up to date (latest {})",
+            check.current, check.latest
+        );
+        return Ok(());
+    }
+    if check.update_available {
+        println!(
+            "fuckmemory {} → {} ({} is available)",
+            check.current, check.latest, check.asset_name
+        );
+    } else if force {
+        println!("already on {}; re-downloading anyway", check.current);
+    }
+    if check_only {
+        println!("run `fuckmemory update` to apply");
+        return Ok(());
+    }
+
+    let exe = std::env::current_exe().context("finding this binary")?;
+    let applied = update::apply(&check, &exe)?;
+    println!("updated to {} at {}", check.latest, applied.display());
+    println!("restart your agents so they pick up the new binary.");
     Ok(())
 }
 

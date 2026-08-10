@@ -12,6 +12,7 @@
 //! - [`hook`]      autosave and auto-recall, for when the agent doesn't ask
 //! - [`tui`]       the interactive settings screen
 //! - [`install`]   detects installed agents and wires itself into each one
+//! - [`update`]    `fuckmemory update` — fetch the latest release and replace this binary
 
 pub mod config;
 pub mod consolidate;
@@ -27,5 +28,6 @@ pub mod retrieve;
 pub mod scope;
 pub mod store;
 pub mod tui;
+pub mod update;
 
 pub use config::Config;

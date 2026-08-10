@@ -145,7 +145,18 @@ git pull
 ./install.sh                     # rebuild + replace the binary in place
 ```
 
-Or pull just the newest binary from a release:
+Once installed, the simplest upgrade is the binary updating itself:
+
+```bash
+fuckmemory update              # check, download the newest release, replace this binary
+fuckmemory update --check      # report what's available without touching anything
+```
+
+`update` downloads the same asset CI publishes for your platform, verifies the
+remote tag is newer than the running version, and swaps the binary in place —
+no manual `curl`, no knowing the version number.
+
+Or pull just the newest binary from a release by hand:
 
 **Linux / macOS:**
 

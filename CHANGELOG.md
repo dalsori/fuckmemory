@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`fuckmemory update` self-updates.** One command checks the latest GitHub
+  release, downloads the asset for your platform, and atomically replaces the
+  running binary — no shell, no manual download, no knowing the version number.
+  `fuckmemory update --check` reports without touching anything.
 - **Antigravity autosave + auto-recall.** `install --autosave` now also wires
   hooks into Antigravity CLI (`~/.gemini/config/hooks.json` and
   `.agents/hooks.json`, `PreInvocation`/`Stop` events, named-map shape). Its

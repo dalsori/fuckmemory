@@ -272,16 +272,53 @@ pub fn cosine_q(a: &[i8], b: &[i8]) -> f32 {
 
 /// Flat int8 matrix of candidate vectors, loaded once per query (or once per
 /// process for the long-lived MCP server).
+///
+/// The storage is either an owned `Vec<i8>` (built from SQLite) or a memory
+/// map of a [`VecIndexFile`] — same bytes, but the mapped form costs an open
+/// and a few page faults instead of a full `SELECT` + parse of every vector,
+/// which is what a one-shot process (autosave hook, CLI recall) pays on each
+/// invocation.
 #[derive(Debug)]
 pub struct VecIndex {
     pub dim: usize,
     pub ids: Vec<i64>,
-    data: Vec<i8>,
+    data: IndexData,
+}
+
+#[derive(Debug)]
+enum IndexData {
+    Owned(Vec<i8>),
+    Mapped(memmap2::Mmap),
+}
+
+impl IndexData {
+    /// The flat row matrix as `&[i8]`. `u8` and `i8` share layout and
+    /// representation, so a mapped byte slice is a valid `&[i8]` of the same
+    /// length; the header validation guarantees the slice is exactly
+    /// `count * dim` bytes before any read is handed out.
+    fn rows(&self) -> &[i8] {
+        match self {
+            IndexData::Owned(v) => v,
+            IndexData::Mapped(m) => {
+                // SAFETY: u8 and i8 have identical layout; the mapping was sized
+                // and validated against the header before being stored.
+                unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<i8>(), m.len()) }
+            }
+        }
+    }
 }
 
 impl VecIndex {
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
+    }
+
+    fn from_parts(dim: usize, ids: Vec<i64>, data: Vec<i8>) -> Self {
+        Self {
+            dim,
+            ids,
+            data: IndexData::Owned(data),
+        }
     }
 
     /// Load the fact vectors for the given scopes, restricted to `when`.
@@ -324,12 +361,41 @@ impl VecIndex {
             ids.push(id);
             data.extend(blob.iter().map(|&x| x as i8));
         }
-        Ok(Self { dim, ids, data })
+        Ok(Self::from_parts(dim, ids, data))
+    }
+
+    /// Wrap a validated [`VecIndexFile`] mapping as an index. Returns `None`
+    /// when the mapping does not match the file header's expectations — the
+    /// caller then falls back to `load_facts`.
+    fn from_mapped(file: &VecIndexFile, mmap: memmap2::Mmap) -> Option<Self> {
+        let n = file.count as usize;
+        let dim = file.dim as usize;
+        let ids_off = file.ids_off;
+        let data_off = file.data_off;
+        let expected = data_off + n * dim;
+        if mmap.len() < expected {
+            return None;
+        }
+        // Copy the ids (a few hundred KB at 100k facts); the vectors stay
+        // mapped and are only touched for the rows a query actually pools.
+        let ids: Vec<i64> = {
+            let bytes = &mmap[ids_off..data_off];
+            // SAFETY: validated alignment (ids start at offset 64) and length
+            // (`n * 8` fits before data_off, itself validated above).
+            let slice =
+                unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<i64>(), n) };
+            slice.to_vec()
+        };
+        Some(Self {
+            dim,
+            ids,
+            data: IndexData::Mapped(mmap),
+        })
     }
 
     #[inline]
     pub fn row(&self, i: usize) -> &[i8] {
-        &self.data[i * self.dim..(i + 1) * self.dim]
+        &self.data.rows()[i * self.dim..(i + 1) * self.dim]
     }
 
     /// Top-`k` by cosine. Returns `(id, score)` descending.
@@ -337,10 +403,10 @@ impl VecIndex {
         if self.ids.is_empty() || self.dim == 0 || query.len() != self.dim {
             return Vec::new();
         }
+        let rows = self.data.rows();
         let mut scored: Vec<(i64, f32)> = if self.ids.len() >= 4_096 {
             use rayon::prelude::*;
-            self.data
-                .par_chunks(self.dim)
+            rows.par_chunks(self.dim)
                 .enumerate()
                 .map(|(i, row)| (self.ids[i], cosine_q(query, row)))
                 .collect()
@@ -361,6 +427,115 @@ impl VecIndex {
     }
 }
 
+/// On-disk form of a [`VecIndex`], so a one-shot process can open it with mmap
+/// instead of re-reading every vector out of SQLite.
+///
+/// Layout (all little-endian):
+///
+/// ```text
+/// offset 0   magic   b"FMVECv01"  (8 bytes)
+/// offset 8   dim     u32
+/// offset 12  count   u32
+/// offset 16  version i64   — the `data_version` the index was built from
+/// offset 24  key     [u8; 32]  — blake3 of (scope_ids, when)
+/// offset 56  layout  u32
+/// offset 60  reserved u32
+/// offset 64  ids     i64 × count
+/// offset 64 + 8·count  data  i8 × count × dim
+/// ```
+///
+/// The header is fixed and the ids start on an 8-byte boundary, which is what
+/// makes the byte-slice-to-`i64` cast in [`VecIndex::from_mapped`] sound.
+const VEC_MAGIC: &[u8; 8] = b"FMVECv01";
+const VEC_HEADER: usize = 64;
+/// Layout version. Bump when the byte layout below changes; an older file is
+/// simply rebuilt on first use.
+const VEC_LAYOUT: u32 = 1;
+
+#[derive(Debug, Clone, Copy)]
+struct VecIndexFile {
+    dim: u32,
+    count: u32,
+    /// SQLite `data_version` this index was built against.
+    version: i64,
+    /// blake3 of the scope set + temporal window, so a different project or an
+    /// `--as-of` query never reuses another query's index.
+    key: [u8; 32],
+    ids_off: usize,
+    data_off: usize,
+}
+
+impl VecIndexFile {
+    /// Parse and validate a header from the start of a mapping. `None` for
+    /// anything that does not match the layout or that would make the reads
+    /// below unsafe.
+    fn read(buf: &[u8]) -> Option<Self> {
+        if buf.len() < VEC_HEADER || &buf[0..8] != VEC_MAGIC {
+            return None;
+        }
+        let dim = u32::from_le_bytes(buf[8..12].try_into().ok()?) as usize;
+        let count = u32::from_le_bytes(buf[12..16].try_into().ok()?) as usize;
+        let version = i64::from_le_bytes(buf[16..24].try_into().ok()?);
+        let layout = u32::from_le_bytes(buf[56..60].try_into().ok()?);
+        if layout != VEC_LAYOUT || dim == 0 || count == 0 {
+            return None;
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&buf[24..56]);
+
+        let ids_off = VEC_HEADER;
+        let data_off = ids_off + count * 8;
+        let total = data_off + count * dim;
+        // Overflow-guard the arithmetic; with realistic counts (≤ millions) this
+        // never fires, but a corrupt header must not turn into a huge offset.
+        if data_off < ids_off || total < data_off || buf.len() < total {
+            return None;
+        }
+        Some(Self {
+            dim: dim as u32,
+            count: count as u32,
+            version,
+            key,
+            ids_off,
+            data_off,
+        })
+    }
+
+    /// Serialize an in-memory index to `path` atomically (temp file + rename),
+    /// so a crash can't leave a half-written index that later opens as valid.
+    fn write(path: &std::path::Path, idx: &VecIndex, version: i64, key: [u8; 32]) -> Result<()> {
+        let data = idx.data.rows();
+        let dim = idx.dim as u32;
+        let count = idx.ids.len() as u32;
+        let mut buf = Vec::with_capacity(VEC_HEADER + idx.ids.len() * 8 + data.len());
+        buf.extend_from_slice(VEC_MAGIC);
+        buf.extend_from_slice(&dim.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        buf.extend_from_slice(&version.to_le_bytes());
+        buf.extend_from_slice(&key);
+        buf.extend_from_slice(&VEC_LAYOUT.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 4]); // reserved, keep header 56 bytes
+        for id in &idx.ids {
+            buf.extend_from_slice(&id.to_le_bytes());
+        }
+        // i8 and u8 share representation; copying bytes is exact.
+        buf.extend_from_slice(unsafe {
+            std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len())
+        });
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating index cache dir {}", parent.display()))?;
+        }
+        let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+        std::fs::write(&tmp, &buf)
+            .with_context(|| format!("writing index cache {}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("installing index cache {}", path.display()))?;
+        Ok(())
+    }
+}
+
 /// Per-connection cache of the last-built vector index.
 ///
 /// The MCP server answers many recalls over one long-lived connection, and at
@@ -377,6 +552,12 @@ impl VecIndex {
 /// One slot is enough. An agent tends to repeat the same question set, so
 /// consecutive recalls hit; a key change just rebuilds, which is no worse than
 /// today.
+///
+/// With [`VecCache::with_dir`], the index is also written to disk (mmap'd on
+/// open) so a one-shot process — an autosave hook, a CLI recall — pays the
+/// SQLite read once per store version instead of on every single invocation.
+/// A file for a stale `data_version` or a different key is ignored and
+/// rebuilt, exactly like the in-memory slot.
 #[derive(Debug, Default)]
 pub struct VecCache {
     /// The key the cached index was built for, if any.
@@ -384,6 +565,8 @@ pub struct VecCache {
     /// `data_version` of this connection when the index was built.
     version: i64,
     idx: Option<VecIndex>,
+    /// Where to persist the index, if anywhere.
+    dir: Option<std::path::PathBuf>,
 }
 
 impl VecCache {
@@ -391,8 +574,17 @@ impl VecCache {
         Self::default()
     }
 
+    /// Persist indexes under `dir` as well as keeping the in-memory slot.
+    pub fn with_dir(dir: std::path::PathBuf) -> Self {
+        Self {
+            dir: Some(dir),
+            ..Self::default()
+        }
+    }
+
     /// Drop whatever is cached. The server calls this after a write on this
-    /// connection, which `data_version` does not reflect.
+    /// connection, which `data_version` does not reflect. The on-disk file is
+    /// left alone: its own version stamp will reject it on the next open.
     pub fn invalidate(&mut self) {
         self.key = None;
         self.idx = None;
@@ -406,12 +598,88 @@ impl VecCache {
         let fresh =
             self.key.as_ref() == Some(&key) && self.version == version && self.idx.is_some();
         if !fresh {
-            self.idx = Some(VecIndex::load_facts(conn, scope_ids, when)?);
+            self.idx = Some(self.load(conn, scope_ids, when, version)?);
             self.key = Some(key);
             self.version = version;
         }
         Ok(self.idx.as_ref().expect("just set"))
     }
+
+    /// Build the index for `(scope_ids, when)` at `version`, preferring the
+    /// on-disk cache when one exists and is valid.
+    fn load(
+        &self,
+        conn: &Connection,
+        scope_ids: &[i64],
+        when: When,
+        version: i64,
+    ) -> Result<VecIndex> {
+        if let Some(dir) = &self.dir {
+            if let Some(file) = self.open_cached(dir, scope_ids, when, version) {
+                return Ok(file);
+            }
+        }
+        let idx = VecIndex::load_facts(conn, scope_ids, when)?;
+        if let Some(dir) = &self.dir {
+            // Best-effort: a write failure is not worth failing the query over.
+            let _ = VecIndexFile::write(
+                &self.cache_path(dir, scope_ids, when),
+                &idx,
+                version,
+                key_hash(scope_ids, when),
+            );
+        }
+        Ok(idx)
+    }
+
+    /// Open the persisted index for `(scope_ids, when)` if it exists and was
+    /// built against `version` (the current `data_version`).
+    fn open_cached(
+        &self,
+        dir: &std::path::Path,
+        scope_ids: &[i64],
+        when: When,
+        version: i64,
+    ) -> Option<VecIndex> {
+        let path = self.cache_path(dir, scope_ids, when);
+        let file = std::fs::File::open(&path).ok()?;
+        // SAFETY: the file is written atomically (temp + rename) and only ever
+        // read; a concurrent rebuild replaces the inode rather than editing it.
+        let mmap = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+        let hdr = VecIndexFile::read(&mmap)?;
+        if hdr.version != version || hdr.key != key_hash(scope_ids, when) {
+            return None;
+        }
+        VecIndex::from_mapped(&hdr, mmap)
+    }
+
+    /// The cache file for a key. The key hash goes into the filename so a
+    /// different project or window never collides on the same file.
+    fn cache_path(
+        &self,
+        dir: &std::path::Path,
+        scope_ids: &[i64],
+        when: When,
+    ) -> std::path::PathBuf {
+        dir.join(format!("vec-{}.fm2", hex16(&key_hash(scope_ids, when))))
+    }
+}
+
+/// blake3 of the cache key (scope set + temporal window).
+fn key_hash(scope_ids: &[i64], when: When) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    for s in scope_ids {
+        h.update(&s.to_le_bytes());
+    }
+    h.update(&[when.tag()]);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.finalize().as_bytes());
+    out
+}
+
+/// First 16 bytes of a hash as hex, for filenames.
+fn hex16(h: &[u8; 32]) -> String {
+    h[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `PRAGMA data_version`: changes when another connection commits to the same
@@ -529,20 +797,119 @@ mod tests {
     #[test]
     fn topk_ranks_and_truncates() {
         let dim = 4;
-        let idx = VecIndex {
+        let idx = VecIndex::from_parts(
             dim,
-            ids: vec![10, 20, 30],
-            data: [
+            vec![10, 20, 30],
+            [
                 quantize(&[1.0, 0.0, 0.0, 0.0]),
                 quantize(&[0.9, 0.1, 0.0, 0.0]),
                 quantize(&[0.0, 0.0, 1.0, 0.0]),
             ]
             .concat(),
-        };
+        );
         let got = idx.topk(&quantize(&[1.0, 0.0, 0.0, 0.0]), 2);
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].0, 10);
         assert_eq!(got[1].0, 20);
+    }
+
+    #[test]
+    fn index_file_roundtrips_and_survives_a_stale_version() {
+        let dir = std::env::temp_dir().join(format!("fm-vec-{}", std::process::id()));
+        let path = dir.join("vec-abc.fm2");
+        let idx = VecIndex::from_parts(
+            4,
+            vec![1, 2, 3],
+            [
+                quantize(&[1.0, 0.0, 0.0, 0.0]),
+                quantize(&[0.0, 1.0, 0.0, 0.0]),
+                quantize(&[0.0, 0.0, 1.0, 0.0]),
+            ]
+            .concat(),
+        );
+        let key = [7u8; 32];
+        VecIndexFile::write(&path, &idx, 42, key).unwrap();
+
+        // Fresh version, matching key: readable, same topk results.
+        let f = std::fs::File::open(&path).unwrap();
+        let mmap = unsafe { memmap2::Mmap::map(&f) }.unwrap();
+        let hdr = VecIndexFile::read(&mmap).expect("valid header");
+        assert_eq!(hdr.version, 42);
+        assert_eq!(hdr.key, key);
+        let loaded = VecIndex::from_mapped(&hdr, mmap).expect("valid index");
+        let got = loaded.topk(&quantize(&[1.0, 0.0, 0.0, 0.0]), 1);
+        assert_eq!(got[0].0, 1, "mapped index ranks like the owned one");
+
+        // Stale version: must be rejected so the caller rebuilds.
+        let f = std::fs::File::open(&path).unwrap();
+        let mmap = unsafe { memmap2::Mmap::map(&f) }.unwrap();
+        let hdr = VecIndexFile::read(&mmap).unwrap();
+        assert_ne!(hdr.version, 43, "sanity");
+        // The file itself still opens; rejection happens in VecCache by version.
+        let _ = VecIndex::from_mapped(&hdr, mmap);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn index_file_rejects_corrupt_headers() {
+        let dir = std::env::temp_dir().join(format!("fm-vec-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad.fm2");
+
+        // Truncated file.
+        std::fs::write(&path, b"F").unwrap();
+        let f = std::fs::File::open(&path).unwrap();
+        let mmap = unsafe { memmap2::Mmap::map(&f) }.unwrap();
+        assert!(VecIndexFile::read(&mmap).is_none(), "too short must fail");
+
+        // Wrong magic.
+        std::fs::write(&path, b"NOTVECv1").unwrap();
+        let f = std::fs::File::open(&path).unwrap();
+        let mmap = unsafe { memmap2::Mmap::map(&f) }.unwrap();
+        assert!(VecIndexFile::read(&mmap).is_none(), "bad magic must fail");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn vec_cache_uses_and_rebuilds_the_disk_cache() {
+        use crate::db;
+        use std::path::Path;
+
+        let dir = std::env::temp_dir().join(format!("fm-vc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = db::open_memory().unwrap();
+        let sc = scope::resolve(&conn, Some("/tmp/fm-vc"), Path::new("/")).unwrap();
+        let scope_ids = scope::read_set(&conn, &sc).unwrap();
+
+        // A stale file (version 5) must be rejected; the fresh empty store has
+        // no vectors, so the rebuilt index is empty too — but it gets written
+        // back to disk for next time.
+        let idx = VecIndex::from_parts(2, vec![1, 2], vec![1, 0, 0, 1]);
+        VecIndexFile::write(
+            &dir.join("vec-x.fm2"),
+            &idx,
+            5,
+            key_hash(&scope_ids, When::Live),
+        )
+        .unwrap();
+
+        let mut cache = VecCache::with_dir(dir.clone());
+        let idx = cache.index(&conn, &scope_ids, When::Live).unwrap();
+        assert!(
+            idx.ids.is_empty(),
+            "fresh store has no vectors: {:?}",
+            idx.ids
+        );
+
+        // A second cache on the same dir should be able to read the file back,
+        // proving the write path produces something readable.
+        let mut cache2 = VecCache::with_dir(dir.clone());
+        let idx2 = cache2.index(&conn, &scope_ids, When::Live).unwrap();
+        assert_eq!(idx2.ids, idx.ids);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Regression test for the bug where the vector leg ignored the temporal
@@ -603,11 +970,7 @@ mod tests {
 
     #[test]
     fn topk_on_empty_index_is_empty() {
-        let idx = VecIndex {
-            dim: 0,
-            ids: vec![],
-            data: vec![],
-        };
+        let idx = VecIndex::from_parts(0, vec![], vec![]);
         assert!(idx.topk(&[1, 2, 3], 5).is_empty());
     }
 

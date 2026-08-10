@@ -74,6 +74,15 @@ impl When {
             When::Any => "1".into(),
         }
     }
+
+    /// A single byte identifying the temporal window, for cache keys.
+    pub fn tag(&self) -> u8 {
+        match self {
+            When::Live => 0,
+            When::AsOf(t) => 1u8.wrapping_add((*t as u64 % 255) as u8),
+            When::Any => 2,
+        }
+    }
 }
 
 pub fn placeholders(n: usize) -> String {

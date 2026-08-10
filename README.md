@@ -441,20 +441,23 @@ touched. 10,000 facts, release build:
 |---|---|---|
 | write (per `remember`) | **172 µs** | 141 µs |
 | recall (per query) | 14.5 ms | 7.7 ms |
+| recall, persisted index | 10.7 ms | — |
 | recall, hot cache | 9.8 ms | — |
 
 ```
 write                        172 µs ▕█
 recall                     14506 µs ▕█████████████████████████████
+recall (disk)              10673 µs ▕██████████████████████
 recall (hot)                9833 µs ▕███████████████████
 ```
 
-The `recall` line is the cold path — every query re-reads the vector index from
-SQLite because the process is one-shot. The `hot cache` line is what a running
-MCP server pays, where the index stays in process and only reloads when
-`data_version` says another agent wrote. Seeding those 10,000 facts costs
-~0.3 ms each, and a full `remember` (INSERT + static embedding) is under a
-quarter of a millisecond.
+The `recall` line is the cold path — it re-reads every vector out of SQLite,
+which is why it alone stays behind the others. The persisted line is what an
+autosave hook or CLI recall actually pays now: the index lives in an mmap'd file
+keyed by the store version, so a one-shot process opens it in milliseconds.
+The `hot cache` line is a long-lived MCP server, where the index never leaves
+the process at all. Seeding those 10,000 facts costs ~0.3 ms each, and a full
+`remember` (INSERT + static embedding) is under a quarter of a millisecond.
 
 Measured on an AMD Ryzen 7 7445HS (12 cores), Linux x86_64, 2026-08-10. To get
 your own numbers: `fuckmemory bench` or `./bench.sh`.
@@ -564,12 +567,13 @@ fuckmemory consolidate && fuckmemory prune --days 90
   is relative to the best match, because measured cosines make an absolute
   threshold impossible: good matches land at 0.09–0.21 while an unrelated query
   still peaks at 0.12. Ranges overlap, so no fixed cutoff separates them.
-- **The vector index is re-read from SQLite when the store changes.** The
-  long-lived MCP server keeps one index in process and only reloads it when
-  `data_version` says another process wrote; one-shot commands (`recall`,
-  the autosave hook) pay it every time, which is fine to ~10k facts (~5 ms)
-  and becomes the bottleneck around 100k. Re-reads happen per command, not
-  per query inside a running agent.
+- **The vector index is persisted, but rebuilt when the store changes.** The
+  index is cached to an mmap'd file keyed by the store version, so one-shot
+  commands (`recall`, the autosave hook) open it in milliseconds instead of
+  re-reading every vector. A write anywhere invalidates it, so a busy store
+  rebuilds — fine to ~100k facts (~90 ms), the point where the rebuild itself
+  starts to matter. A long-lived MCP server keeps one index in process and only
+  reloads on `data_version` changes.
 - **JSONC comments are lost.** Configs with comments (OpenCode, VS Code) are
   rewritten as plain JSON. A backup is kept next to the original and a warning is
   printed. TOML keeps its comments — `toml_edit` preserves them.

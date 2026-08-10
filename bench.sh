@@ -34,6 +34,7 @@ WRITE_ON=$(pick "$ON" write)
 WRITE_OFF=$(pick "$OFF" write)
 RECALL_ON=$(pick "$ON" 'recall ')
 RECALL_OFF=$(pick "$OFF" 'recall ')
+DISK_ON=$(pick "$ON" 'recall disk')
 HOT_ON=$(pick "$ON" 'recall hot')
 
 echo
@@ -43,6 +44,7 @@ printf '%-26s %12s %12s\n' "" "semantic on" "semantic off"
 printf '%-26s %12s %12s\n' "--------------------------" "------------" "------------"
 printf '%-26s %12s %12s\n' "write (per remember)" "$WRITE_ON" "$WRITE_OFF"
 printf '%-26s %12s %12s\n' "recall (per query)" "$RECALL_ON" "$RECALL_OFF"
+[ -n "$DISK_ON" ] && printf '%-26s %12s\n' "recall, persisted index" "$DISK_ON"
 [ -n "$HOT_ON" ] && printf '%-26s %12s\n' "recall, hot cache" "$HOT_ON"
 
 echo
@@ -53,6 +55,7 @@ cat <<EOF
 |---|---|---|
 | write (per \`remember\`) | ${WRITE_ON:-—} µs | ${WRITE_OFF:-—} µs |
 | recall (per query) | ${RECALL_ON:-—} µs | ${RECALL_OFF:-—} µs |
+| recall, persisted index | ${DISK_ON:-—} µs | — |
 | recall, hot cache | ${HOT_ON:-—} µs | — |
 EOF
 
@@ -70,6 +73,7 @@ bar() {
 }
 bar "$WRITE_ON" "write"
 bar "$RECALL_ON" "recall"
+bar "$DISK_ON" "recall (disk)"
 bar "$HOT_ON" "recall (hot)"
 
 echo

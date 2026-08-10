@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with and without the embedding model, plus the steady-state "hot cache" number
   a running MCP server pays. `./bench.sh` wraps it into a markdown table + ASCII
   chart annotated with the machine, so the README's numbers are reproducible.
+- **Persisted vector index.** The int8 vector index is written to an mmap'd file
+  keyed by the store version and scope set, so a one-shot process — an autosave
+  hook, a CLI recall — opens the mapped index instead of re-reading every vector
+  out of SQLite. At 100k facts this cuts a cold recall from ~164 ms to ~91 ms,
+  matching the in-process cache of a long-lived MCP server.
 - **Repository polish for reach.** A custom social-preview image (the link
   preview on GitHub and social networks), a `FUNDING.yml`, and issue/PR
   templates.

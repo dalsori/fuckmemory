@@ -124,6 +124,20 @@ impl Server {
                                 },
                                 "required": ["statement"]
                             }
+                        },
+                        "files": {
+                            "type": "array",
+                            "description": "Files this memory was learned against. Pass `path` (plus optional `line_from`/`line_to`) and the snippet is read from disk; or pass `snippet` directly to store exactly what you saw.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "path": { "type": "string", "description": "File path, relative to the workspace or absolute." },
+                                    "line_from": { "type": "integer", "description": "First line kept (1-based, inclusive)." },
+                                    "line_to": { "type": "integer", "description": "Last line kept (1-based, inclusive)." },
+                                    "snippet": { "type": "string", "description": "Optional: the exact excerpt to store, overriding a disk read." }
+                                },
+                                "required": ["path"]
+                            }
                         }
                     },
                     "required": ["text"]
@@ -305,6 +319,43 @@ impl Server {
         }
         if normalized.get("source").is_none() {
             normalized["source"] = json!(client_name());
+        }
+        // Resolve files: a bare `path` (optionally with `lines`) is read off
+        // disk so recall can point at the actual excerpt. A caller that already
+        // handed us a `snippet` is trusted as-is.
+        if let Some(files) = normalized.get_mut("files").and_then(Value::as_array_mut) {
+            let base = self.cwd.clone();
+            for f in files.iter_mut() {
+                if f.get("snippet").map(Value::is_string).unwrap_or(false) {
+                    continue;
+                }
+                let Some(path) = f.get("path").and_then(Value::as_str) else {
+                    continue;
+                };
+                let lines = match (f.get("line_from"), f.get("line_to")) {
+                    (Some(a), Some(b)) => {
+                        let (Some(a), Some(b)) = (a.as_i64(), b.as_i64()) else {
+                            anyhow::bail!("line_from/line_to must be integers");
+                        };
+                        Some((a, b))
+                    }
+                    (None, None) => None,
+                    _ => anyhow::bail!("pass both line_from and line_to, or neither"),
+                };
+                match store::read_file_input(path, &base, lines) {
+                    Ok(fi) => {
+                        f["snippet"] = json!(fi.snippet);
+                        f["lang"] = fi.lang.map(Value::String).unwrap_or(Value::Null);
+                        f["line_from"] = fi.line_from.map(Value::from).unwrap_or(Value::Null);
+                        f["line_to"] = fi.line_to.map(Value::from).unwrap_or(Value::Null);
+                    }
+                    Err(e) => {
+                        // Don't fail the whole write for one unreadable file; the
+                        // memory itself is still valuable. Tell the caller.
+                        return Ok(format!("warning: {e:#}"));
+                    }
+                }
+            }
         }
         let input: RememberInput = serde_json::from_value(normalized)
             .map_err(|e| anyhow::anyhow!("bad arguments: {e}"))?;

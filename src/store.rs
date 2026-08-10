@@ -104,6 +104,96 @@ pub struct FileInput {
     pub line_to: Option<i64>,
 }
 
+/// Longest snippet kept per file. Enough to point at *where* a convention lives
+/// without dragging the whole file into every recall.
+pub const MAX_SNIPPET_CHARS: usize = 2_000;
+/// Line cap before a snippet is truncated with a marker.
+const MAX_SNIPPET_LINES: usize = 60;
+
+/// Map a file extension to a display language, for fenced code blocks.
+fn lang_for(path: &str) -> Option<String> {
+    let ext = path.rsplit('.').next()?.to_ascii_lowercase();
+    let lang = match ext.as_str() {
+        "rs" | "toml" => "rust",
+        "ts" | "tsx" => "typescript",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "py" => "python",
+        "go" => "go",
+        "rb" => "ruby",
+        "java" | "kt" | "kts" => "kotlin",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "hpp" => "cpp",
+        "cs" => "csharp",
+        "swift" => "swift",
+        "php" => "php",
+        "sh" | "bash" | "zsh" => "bash",
+        "ps1" => "powershell",
+        "sql" => "sql",
+        "html" | "htm" => "html",
+        "css" | "scss" | "less" => "css",
+        "json" | "jsonc" => "json",
+        "yaml" | "yml" => "yaml",
+        "md" | "markdown" => "markdown",
+        "dockerfile" => "dockerfile",
+        "makefile" | "mk" => "make",
+        "zig" => "zig",
+        "lua" => "lua",
+        "r" => "r",
+        _ => return None,
+    };
+    Some(lang.into())
+}
+
+/// Read a file into a `FileInput`: bounded snippet, detected language, and the
+/// line range actually kept. `lines` is `(from, to)`, 1-based inclusive, and
+/// when absent the snippet is the head of the file. Fails cleanly if the file
+/// can't be read, so the caller can decide to proceed without the reference.
+pub fn read_file_input(
+    path: &str,
+    base: &std::path::Path,
+    lines: Option<(i64, i64)>,
+) -> anyhow::Result<FileInput> {
+    let full = if std::path::Path::new(path).is_absolute() {
+        std::path::PathBuf::from(path)
+    } else {
+        base.join(path)
+    };
+    let text = std::fs::read_to_string(&full)
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", full.display()))?;
+    let all_lines: Vec<&str> = text.split('\n').collect();
+
+    let (from, to) = match lines {
+        Some((a, b)) => {
+            let a = (a.max(1) as usize).min(all_lines.len());
+            let b = (b.max(a as i64) as usize).min(all_lines.len());
+            (a, b)
+        }
+        None => (1, MAX_SNIPPET_LINES.min(all_lines.len()).max(1)),
+    };
+    let mut snippet: String = all_lines[from - 1..to].join("\n");
+    let mut line_to = to as i64;
+    if snippet.chars().count() > MAX_SNIPPET_CHARS {
+        snippet = snippet.chars().take(MAX_SNIPPET_CHARS).collect();
+        line_to = -1;
+    }
+    // A reader should know the excerpt is partial, whether we cut by lines or by
+    // characters.
+    if to < all_lines.len() || line_to == -1 {
+        if !snippet.is_empty() && !snippet.ends_with('\n') {
+            snippet.push('\n');
+        }
+        snippet.push_str("… (truncated)");
+    }
+
+    Ok(FileInput {
+        path: path.to_string(),
+        lang: lang_for(path),
+        snippet,
+        line_from: Some(from as i64),
+        line_to: Some(line_to),
+    })
+}
+
 fn default_true() -> bool {
     true
 }
@@ -909,5 +999,46 @@ mod tests {
             })
             .unwrap();
         assert_eq!(n, 1, "row still there for timeline queries");
+    }
+
+    #[test]
+    fn read_file_input_takes_the_head_by_default() {
+        let dir = std::env::temp_dir().join(format!("fm-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("Makefile");
+        let body: String = (1..=100).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&f, &body).unwrap();
+
+        let fi = read_file_input("Makefile", &dir, None).unwrap();
+        assert_eq!(fi.lang.as_deref(), Some("make"));
+        assert_eq!(fi.line_from, Some(1));
+        assert!(fi.line_to.unwrap() <= 60, "capped at MAX_SNIPPET_LINES");
+        assert!(fi.snippet.starts_with("line 1"));
+        assert!(fi.snippet.contains("truncated"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_file_input_honors_an_explicit_line_range() {
+        let dir = std::env::temp_dir().join(format!("fm-file2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("script.py");
+        let body: String = (1..=50).map(|i| format!("def fn{i}(): pass\n")).collect();
+        std::fs::write(&f, &body).unwrap();
+
+        let fi = read_file_input("script.py", &dir, Some((10, 12))).unwrap();
+        assert_eq!(fi.lang.as_deref(), Some("python"));
+        assert_eq!(fi.line_from, Some(10));
+        assert_eq!(fi.line_to, Some(12));
+        assert!(fi.snippet.starts_with("def fn10"), "got {:?}", fi.snippet);
+        assert!(!fi.snippet.contains("fn13"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_file_input_fails_cleanly_on_missing_file() {
+        assert!(read_file_input("nope.rs", Path::new("/definitely/missing"), None).is_err());
     }
 }

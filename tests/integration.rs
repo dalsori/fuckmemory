@@ -118,6 +118,67 @@ fn cli_reports_failure_with_a_nonzero_exit() {
 }
 
 #[test]
+fn remember_with_a_file_points_recall_at_the_source() {
+    let home = scratch("files");
+    let file = home.join("proj/Makefile");
+    std::fs::write(&file, "deploy:\n\tfly deploy\n\nlint:\n\tcargo clippy\n").unwrap();
+
+    let (out, err, ok) = run(
+        &home,
+        &[
+            "remember",
+            "--file",
+            "Makefile",
+            "deploys run through the Makefile",
+        ],
+    );
+    assert!(ok, "got {err}: {out}");
+
+    // Normal recall shows the path (not the snippet).
+    let (out, _, ok) = run(&home, &["recall", "how", "do", "we", "deploy"]);
+    assert!(ok);
+    assert!(out.contains("Makefile"), "recall must name the file: {out}");
+    assert!(
+        !out.contains("fly deploy"),
+        "snippet hidden in normal recall: {out}"
+    );
+
+    // Debug recall shows the stored excerpt.
+    let (out, _, _) = run(&home, &["recall", "--debug", "how", "do", "we", "deploy"]);
+    assert!(
+        out.contains("fly deploy"),
+        "snippet visible in --debug: {out}"
+    );
+
+    // A line range keeps only those lines.
+    std::fs::write(
+        &file,
+        (1..=40).map(|i| format!("line {i}\n")).collect::<String>(),
+    )
+    .unwrap();
+    let (out, err, ok) = run(
+        &home,
+        &[
+            "remember",
+            "--file",
+            "Makefile:10-12",
+            "the file is now long",
+        ],
+    );
+    assert!(ok, "got {err}: {out}");
+    let (out, _, _) = run(&home, &["recall", "--debug", "now", "long"]);
+    assert!(
+        out.contains("line 10") && !out.contains("line 13"),
+        "got {out}"
+    );
+
+    // A missing file fails the remember.
+    let (_, err, ok) = run(&home, &["remember", "--file", "no-such.rs", "x"]);
+    assert!(!ok, "missing file must fail");
+    assert!(err.contains("reading"), "got {err}");
+}
+
+#[test]
 fn global_scope_is_visible_from_a_project() {
     let home = scratch("scopes");
     run(
@@ -257,6 +318,59 @@ fn mcp_handshake_and_tool_round_trip_over_stdio() {
         serde_json::json!({ "query": "how does the queue drain" }),
     );
     assert!(out.contains("cron"), "got {out}");
+}
+
+#[test]
+fn mcp_remember_with_a_file_path_reads_the_snippet() {
+    let home = scratch("mcp-files");
+    std::fs::write(
+        home.join("proj/pnpm-workspace.yaml"),
+        "packages:\n  - 'apps/*'\n",
+    )
+    .unwrap();
+    let mut s = Mcp::start(&home);
+
+    let out = s.call(
+        1,
+        "remember",
+        serde_json::json!({
+            "text": "all apps live in the pnpm workspace",
+            "files": [{ "path": "pnpm-workspace.yaml" }]
+        }),
+    );
+    assert!(out.starts_with("Remembered"), "got {out}");
+
+    let out = s.call(
+        2,
+        "recall",
+        serde_json::json!({ "query": "where do the apps live" }),
+    );
+    assert!(
+        out.contains("pnpm-workspace.yaml"),
+        "recall names the file: {out}"
+    );
+
+    // An explicit snippet is trusted without touching the disk.
+    let out = s.call(
+        3,
+        "remember",
+        serde_json::json!({
+            "text": "the root uses packageManager pnpm@9",
+            "files": [{ "path": "package.json", "snippet": "\"packageManager\": \"pnpm@9.0.0\"" }]
+        }),
+    );
+    assert!(out.starts_with("Remembered"), "got {out}");
+
+    // A missing file warns but does not fail the whole write.
+    let out = s.call(
+        4,
+        "remember",
+        serde_json::json!({
+            "text": "something valuable anyway",
+            "files": [{ "path": "definitely/not/here.ts" }]
+        }),
+    );
+    assert!(out.contains("warning"), "missing file should warn: {out}");
 }
 
 #[test]

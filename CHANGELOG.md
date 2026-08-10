@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompt event does not carry the prompt text, so `hook prompt` reads the most
   recent user request back from the conversation transcript, and context is
   injected as an `ephemeralMessage` step.
+- **Memories point at files.** `remember` accepts `files` — a path plus an
+  optional line range, or a ready-made snippet — and stores a bounded excerpt of
+  the file a memory was learned against. Recall shows the path (backticked, with
+  the line range) next to the fact, and `--debug` reveals the stored excerpt with
+  its detected language. CLI: `fuckmemory remember … --file PATH[:FROM-TO]`.
 
 ### Changed
 

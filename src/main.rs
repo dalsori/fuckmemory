@@ -110,6 +110,10 @@ enum Cmd {
         /// When this became true in the world (YYYY-MM-DD)
         #[arg(long)]
         since: Option<String>,
+        /// Attach a file (repeatable): its head is stored so recall can point at
+        /// it. `path:from-to` attaches only those lines.
+        #[arg(long, value_name = "PATH[:FROM-TO]", value_delimiter = ',')]
+        file: Vec<String>,
     },
     /// Search memory
     Recall {
@@ -291,7 +295,8 @@ fn run() -> Result<()> {
             rel,
             dst,
             since,
-        } => cmd_remember(&cfg, text, kind, scope, src, rel, dst, since),
+            file,
+        } => cmd_remember(&cfg, text, kind, scope, src, rel, dst, since, file),
         Cmd::Recall {
             query,
             limit,
@@ -400,6 +405,18 @@ fn run() -> Result<()> {
 
 fn cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Parse a `FROM-TO` line range as used by `--file PATH:FROM-TO`. Returns `None`
+/// for anything malformed.
+fn parse_line_range(s: &str) -> Option<(i64, i64)> {
+    let (a, b) = s.split_once('-')?;
+    let a: i64 = a.trim().parse().ok()?;
+    let b: i64 = b.trim().parse().ok()?;
+    if a < 1 || b < a {
+        return None;
+    }
+    Some((a, b))
 }
 
 fn home() -> Result<PathBuf> {
@@ -731,6 +748,7 @@ fn cmd_remember(
     rel: Option<String>,
     dst: Option<String>,
     since: Option<String>,
+    files: Vec<String>,
 ) -> Result<()> {
     let text = text.join(" ");
     anyhow::ensure!(!text.trim().is_empty(), "nothing to remember");
@@ -759,6 +777,22 @@ fn cmd_remember(
         vec![]
     };
 
+    // Parse each `--file` (repeatable) as `path[:from-to]` and read it.
+    let base = cwd();
+    let mut file_inputs = Vec::new();
+    for spec in &files {
+        let (path, lines) = match spec.split_once(':') {
+            Some((p, range)) => {
+                let r = parse_line_range(range).ok_or_else(|| {
+                    anyhow::anyhow!("--file range must look like PATH:FROM-TO, got {spec:?}")
+                })?;
+                (p, Some(r))
+            }
+            None => (spec.as_str(), None),
+        };
+        file_inputs.push(store::read_file_input(path, &base, lines)?);
+    }
+
     let out = store::remember(
         &mut conn,
         &sc,
@@ -768,7 +802,7 @@ fn cmd_remember(
             kind,
             source: "cli".into(),
             facts,
-            files: vec![],
+            files: file_inputs,
             meta: None,
             derive: true,
         },

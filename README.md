@@ -333,15 +333,20 @@ agent's context window on every single turn.
 - **`recall`** — search memory before assuming anything. Returns a
   token-budgeted list of standalone facts.
 - **`remember`** — store something that will matter next session. Optional
-  structured `facts` (`src`/`rel`/`dst`) make retrieval much better.
+  structured `facts` (`src`/`rel`/`dst`) make retrieval much better. Pass
+  `files` (path, plus optional `line_from`/`line_to`, or a ready-made `snippet`)
+  to attach the file a memory was learned against — recall then points straight
+  at the source, and shows the excerpt in `--debug`.
 - **`forget`** — retract something wrong or obsolete. Soft by default.
 - **`timeline`** — how knowledge about one entity changed over time.
 
-A recall renders like this, hard-capped at a token budget:
+A recall renders like this, hard-capped at a token budget. Memories that name a
+file show it backticked with the line range:
 
 ```markdown
 ## Memory — myproject
 - deploys go out through fly.io, never vercel
+    `Makefile`:1–6
 - the project uses pnpm now, npm left duplicate lockfiles [since 2026-03-14]
 - never commit with --no-verify, the pre-commit hook is the only formatter
 ```
@@ -438,6 +443,7 @@ fuckmemory hook prompt|session-end [--agent id] [--text ...]
 
 fuckmemory remember <text> [--kind decision|preference|constraint|error]
                            [--src X --rel uses --dst Y] [--since YYYY-MM-DD]
+                           [--file PATH[:FROM-TO]] ...   # attach a file/snippet
 fuckmemory recall <query> [--limit N] [--as-of DATE] [--hops 0-2]
                           [--budget N] [--raw] [--debug] [--json]
 fuckmemory forget <id> | --query <text> [--hard]

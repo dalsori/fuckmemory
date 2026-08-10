@@ -19,10 +19,14 @@ pub struct FactRow {
     pub recorded_at: i64,
     pub invalidated_at: Option<i64>,
     pub hits: i64,
+    /// The episode this fact was derived from, when there is one. Used to look
+    /// up the files the memory was learned against.
+    pub episode_id: Option<i64>,
 }
 
 const SELECT_FACT: &str = "SELECT f.id, f.scope_id, se.name, f.rel, de.name, f.statement,
-        f.confidence, f.valid_from, f.valid_to, f.recorded_at, f.invalidated_at, f.hits
+        f.confidence, f.valid_from, f.valid_to, f.recorded_at, f.invalidated_at, f.hits,
+        f.episode_id
  FROM facts f
  LEFT JOIN entities se ON se.id = f.src
  LEFT JOIN entities de ON de.id = f.dst";
@@ -41,6 +45,7 @@ fn map_fact(r: &Row) -> rusqlite::Result<FactRow> {
         recorded_at: r.get(9)?,
         invalidated_at: r.get(10)?,
         hits: r.get(11)?,
+        episode_id: r.get(12)?,
     })
 }
 
@@ -257,6 +262,7 @@ mod tests {
                         confidence: 1.0,
                         supersede: None,
                     }],
+                    files: vec![],
                     meta: None,
                     derive: true,
                 },
@@ -339,6 +345,7 @@ mod tests {
                         confidence: 1.0,
                         supersede: None,
                     }],
+                    files: vec![],
                     meta: None,
                     derive: true,
                 },

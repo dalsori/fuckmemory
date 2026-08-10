@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 /// Bumped whenever `MIGRATIONS` grows. Stored in `meta`.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Discriminator for the shared `vecs` table.
 pub const VEC_FACT: i64 = 1;
@@ -153,6 +153,25 @@ CREATE TABLE pending (
     episode_id INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
     queued_at  INTEGER NOT NULL
 );
+"#,
+    // ---- v2: file references ------------------------------------------------
+    // Memories can carry the file they were learned against. `path` is relative
+    // to the project root the memory was recorded in; `snippet` holds a bounded
+    // excerpt (or the lines the user pointed at) so a recall can show *where* a
+    // convention lives without re-reading the whole tree.
+    r#"
+CREATE TABLE file_refs (
+    id          INTEGER PRIMARY KEY,
+    episode_id  INTEGER NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
+    path        TEXT NOT NULL,
+    lang        TEXT,
+    snippet     TEXT NOT NULL,
+    line_from   INTEGER,
+    line_to     INTEGER,
+    recorded_at INTEGER NOT NULL
+);
+CREATE INDEX file_refs_episode ON file_refs(episode_id);
+CREATE INDEX file_refs_path ON file_refs(path);
 "#,
 ];
 
@@ -371,7 +390,7 @@ mod tests {
         migrate(&conn).unwrap();
         assert_eq!(
             meta_get(&conn, "schema_version").unwrap().as_deref(),
-            Some("1")
+            Some("2")
         );
     }
 

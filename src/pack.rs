@@ -106,6 +106,36 @@ pub fn render(recall: &Recall, opts: &PackOptions, now_ts: i64) -> String {
         if opts.debug {
             line.push_str(&format!("  ({:.4} via {})", h.score, h.via.join("+")));
         }
+        // Point at the file(s) this memory was learned against, when any.
+        if let Some(eid) = h.fact.episode_id {
+            if let Some(files) = recall.files.get(&eid) {
+                for f in files {
+                    let where_ = match (f.line_from, f.line_to) {
+                        (Some(a), Some(b)) if a != b => format!(":{}–{}", a, b),
+                        (Some(a), _) => format!(":{a}"),
+                        _ => String::new(),
+                    };
+                    let marker = if opts.debug {
+                        // Debug builds show the bounded snippet so humans can
+                        // verify the reference landed where it should.
+                        format!(
+                            "\n    `{}`{}\n    ```{}",
+                            f.path,
+                            where_,
+                            f.lang.as_deref().unwrap_or("")
+                        )
+                    } else {
+                        format!("\n    `{}`{}", f.path, where_)
+                    };
+                    line.push_str(&marker);
+                    if opts.debug && !f.snippet.trim().is_empty() {
+                        line.push('\n');
+                        line.push_str(f.snippet.trim_end());
+                        line.push_str("\n    ```");
+                    }
+                }
+            }
+        }
         line.push('\n');
         let cost = est_tokens(&line);
         // Always emit at least one line: a budget too small to fit the single
@@ -170,6 +200,7 @@ mod tests {
             recorded_at,
             invalidated_at: None,
             hits: 0,
+            episode_id: None,
         }
     }
 
@@ -184,6 +215,7 @@ mod tests {
                 })
                 .collect(),
             episodes: vec![],
+            files: std::collections::HashMap::new(),
             semantic: false,
             took_us: 0,
         }
@@ -265,6 +297,40 @@ mod tests {
             now,
         );
         assert!(!out.contains("since"), "got {out:?}");
+    }
+
+    #[test]
+    fn files_render_as_backticked_paths_and_snippets_in_debug() {
+        let now = 1_800_000_000_000;
+        let mut f = fact(7, "the deploy target is a make target", now);
+        f.episode_id = Some(42);
+        let mut r = recall_of(vec![f]);
+        r.files.insert(
+            42,
+            vec![crate::store::FileRef {
+                path: "Makefile".into(),
+                lang: Some("make".into()),
+                snippet: "deploy:\n\tfly deploy\n".into(),
+                line_from: Some(1),
+                line_to: Some(2),
+            }],
+        );
+
+        let normal = render(&r, &opts(500), now);
+        assert!(normal.contains("`Makefile`:1–2"), "got {normal:?}");
+        assert!(
+            !normal.contains("fly deploy"),
+            "snippet hidden in normal: {normal:?}"
+        );
+
+        let mut dbg = opts(500);
+        dbg.debug = true;
+        let debug = render(&r, &dbg, now);
+        assert!(debug.contains("```make"), "got {debug:?}");
+        assert!(
+            debug.contains("fly deploy"),
+            "snippet shown in debug: {debug:?}"
+        );
     }
 
     #[test]

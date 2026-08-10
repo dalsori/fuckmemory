@@ -223,6 +223,7 @@ mod tests {
             kind: "note".into(),
             source: "test".into(),
             facts: vec![],
+            files: vec![],
             meta: None,
             derive: true,
         }

@@ -570,6 +570,7 @@ mod tests {
                 confidence: 1.0,
                 supersede: None,
             }],
+            files: vec![],
             meta: None,
             derive: true,
         };
@@ -644,6 +645,7 @@ mod tests {
                         confidence: 1.0,
                         supersede: None,
                     }],
+                    files: vec![],
                     meta: None,
                     derive: true,
                 },

@@ -126,6 +126,9 @@ pub struct EpisodeHit {
 pub struct Recall {
     pub hits: Vec<Hit>,
     pub episodes: Vec<EpisodeHit>,
+    /// Files attached to the episodes behind the returned facts, keyed by
+    /// episode id. Lets a recall point at *where* a memory was learned.
+    pub files: std::collections::HashMap<i64, Vec<crate::store::FileRef>>,
     /// False when the model wasn't available and we ran BM25-only.
     pub semantic: bool,
     pub took_us: u128,
@@ -484,9 +487,41 @@ pub fn recall(
         _ => Vec::new(),
     };
 
+    // Files behind the returned facts: collect the distinct episodes they came
+    // from and group the references by episode so rendering can attach them.
+    let mut episode_ids: Vec<i64> = Vec::new();
+    for h in &hits {
+        if let Some(eid) = h.fact.episode_id {
+            if !episode_ids.contains(&eid) {
+                episode_ids.push(eid);
+            }
+        }
+    }
+    let mut files: std::collections::HashMap<i64, Vec<crate::store::FileRef>> =
+        std::collections::HashMap::new();
+    let by_episode: std::collections::HashMap<i64, Vec<crate::store::FileRef>> = episode_ids
+        .iter()
+        .map(|eid| {
+            (
+                *eid,
+                crate::store::files_for_episodes(conn, &[*eid]).unwrap_or_default(),
+            )
+        })
+        .collect();
+    for h in &hits {
+        if let Some(eid) = h.fact.episode_id {
+            if let Some(list) = by_episode.get(&eid) {
+                if !list.is_empty() {
+                    files.insert(eid, list.clone());
+                }
+            }
+        }
+    }
+
     Ok(Recall {
         hits,
         episodes,
+        files,
         semantic,
         took_us: t0.elapsed().as_micros(),
     })
@@ -525,6 +560,7 @@ mod tests {
                     confidence: 1.0,
                     supersede: None,
                 }],
+                files: vec![],
                 meta: None,
                 derive: true,
             },

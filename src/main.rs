@@ -768,6 +768,7 @@ fn cmd_remember(
             kind,
             source: "cli".into(),
             facts,
+            files: vec![],
             meta: None,
             derive: true,
         },

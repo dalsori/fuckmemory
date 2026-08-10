@@ -295,6 +295,7 @@ pub fn run(
             source: format!("autosave:{agent}"),
             facts: vec![],
             meta: Some(json!({ "session": session, "event": "prompt", "agent": agent })),
+            files: vec![],
             // Non-salient prompts stay episodes: kept and searchable, but never
             // ranked next to a real decision.
             derive: salient,

@@ -72,6 +72,10 @@ pub struct RememberInput {
     pub facts: Vec<FactInput>,
     #[serde(default)]
     pub meta: Option<serde_json::Value>,
+    /// Files the memory was learned against. Each carries a bounded snippet so a
+    /// recall can show *where* a convention lives.
+    #[serde(default)]
+    pub files: Vec<FileInput>,
     /// Guess a fact out of the text when the caller supplied none.
     ///
     /// Autosave sets this to false for anything that doesn't look like durable
@@ -81,6 +85,23 @@ pub struct RememberInput {
     /// deploy through fly.io".
     #[serde(default = "default_true")]
     pub derive: bool,
+}
+
+/// A file attached to a memory. `snippet` is written by the caller (usually the
+/// hook, reading the referenced lines); it is what recall can show.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FileInput {
+    /// Path as the agent knew it, e.g. `src/db.rs` or `/abs/path`.
+    pub path: String,
+    /// Detected language for `path`, if any.
+    #[serde(default)]
+    pub lang: Option<String>,
+    /// Bounded excerpt of the file. Required: the caller reads the file.
+    pub snippet: String,
+    #[serde(default)]
+    pub line_from: Option<i64>,
+    #[serde(default)]
+    pub line_to: Option<i64>,
 }
 
 fn default_true() -> bool {
@@ -240,6 +261,30 @@ pub fn remember(
             "INSERT INTO pending(episode_id, queued_at) VALUES(?1, ?2)",
             params![episode_id, ts],
         )?;
+
+        // Attach the files this memory was learned against. Dedup by path within
+        // the episode: the same file named twice only contributes one reference.
+        let mut seen: Vec<String> = Vec::new();
+        for f in &input.files {
+            let path = f.path.trim();
+            if path.is_empty() || seen.iter().any(|p| p == path) {
+                continue;
+            }
+            seen.push(path.to_string());
+            tx.execute(
+                "INSERT INTO file_refs(episode_id, path, lang, snippet, line_from, line_to, recorded_at)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    episode_id,
+                    path,
+                    f.lang,
+                    f.snippet,
+                    f.line_from,
+                    f.line_to,
+                    ts
+                ],
+            )?;
+        }
     }
 
     // Facts the agent handed us win; otherwise derive one from the text, unless
@@ -374,6 +419,46 @@ pub fn insert_fact(
         embed::put_vec(conn, VEC_FACT, id, &e.embed_q(statement))?;
     }
     Ok((Some(id), superseded))
+}
+
+/// A file attached to an episode, as read back for recall.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileRef {
+    pub path: String,
+    pub lang: Option<String>,
+    pub snippet: String,
+    pub line_from: Option<i64>,
+    pub line_to: Option<i64>,
+}
+
+/// Read the files attached to a set of episodes, one `FileRef` per `(episode,
+/// path)`, ordered by episode then recorded line range.
+pub fn files_for_episodes(conn: &Connection, episode_ids: &[i64]) -> Result<Vec<FileRef>> {
+    if episode_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders: Vec<String> = (0..episode_ids.len()).map(|_| "?".into()).collect();
+    let sql = format!(
+        "SELECT path, lang, snippet, line_from, line_to
+         FROM file_refs WHERE episode_id IN ({})
+         ORDER BY episode_id, line_from",
+        placeholders.join(",")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(episode_ids), |r| {
+        Ok(FileRef {
+            path: r.get(0)?,
+            lang: r.get(1)?,
+            snippet: r.get(2)?,
+            line_from: r.get(3)?,
+            line_to: r.get(4)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 /// Build a fact from raw text when the agent gave us no structure.
@@ -615,6 +700,7 @@ mod tests {
             kind: "note".into(),
             source: "test".into(),
             facts: vec![],
+            files: vec![],
             meta: None,
             derive: true,
         }
@@ -644,6 +730,41 @@ mod tests {
     }
 
     #[test]
+    fn files_are_attached_and_read_back() {
+        let (mut conn, sc) = setup();
+        let mut input = note("the deploy script lives in the Makefile");
+        input.files = vec![FileInput {
+            path: "Makefile".into(),
+            lang: Some("make".into()),
+            snippet: "deploy:\n\tfly deploy\n".into(),
+            line_from: Some(1),
+            line_to: Some(2),
+        }];
+        let out = remember(&mut conn, &sc, None, &input).unwrap();
+
+        let files = files_for_episodes(&conn, &[out.episode_id]).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "Makefile");
+        assert_eq!(files[0].lang.as_deref(), Some("make"));
+        assert_eq!(files[0].line_from, Some(1));
+        assert!(files[0].snippet.contains("fly deploy"));
+
+        // Duplicate path within one episode collapses to a single reference.
+        input.files.push(FileInput {
+            path: "Makefile".into(),
+            lang: None,
+            snippet: "deploy:\n\tfly deploy\n".into(),
+            line_from: None,
+            line_to: None,
+        });
+        let again = remember(&mut conn, &sc, None, &input).unwrap();
+        // Same text → same episode → nothing new appended.
+        assert!(again.duplicate);
+        let files = files_for_episodes(&conn, &[again.episode_id]).unwrap();
+        assert_eq!(files.len(), 1, "path dedup within an episode");
+    }
+
+    #[test]
     fn single_valued_relation_supersedes_and_keeps_history() {
         let (mut conn, sc) = setup();
         let f = |dst: &str| RememberInput {
@@ -660,6 +781,7 @@ mod tests {
                 confidence: 1.0,
                 supersede: None,
             }],
+            files: vec![],
             meta: None,
             derive: true,
         };
@@ -710,6 +832,7 @@ mod tests {
                         confidence: 1.0,
                         supersede: None,
                     }],
+                    files: vec![],
                     meta: None,
                     derive: true,
                 },

@@ -1,13 +1,22 @@
 # fuckmemory
 
-[![CI](https://github.com/dalsori/fuckmemory/actions/workflows/ci.yml/badge.svg)](https://github.com/dalsori/fuckmemory/actions/workflows/ci.yml)
-
-One local memory, shared by every AI coding agent you use.
+<p align="center">
+  <b>One local memory, shared by every AI coding agent you use.</b><br/>
+  <a href="https://github.com/dalsori/fuckmemory/actions/workflows/ci.yml">
+    <img src="https://github.com/dalsori/fuckmemory/actions/workflows/ci.yml/badge.svg" alt="CI"/>
+  </a>
+  <a href="https://github.com/dalsori/fuckmemory/releases">
+    <img src="https://img.shields.io/github/v/release/dalsori/fuckmemory" alt="version"/>
+  </a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT"/></a>
+  <img src="https://img.shields.io/badge/rust-1.85+-orange.svg" alt="Rust 1.85+"/>
+</p>
 
 Your agents forget everything between sessions, and they each forget separately.
 Claude Code learns your deploy process on Monday; Codex re-derives it on Tuesday;
 OpenCode asks you again on Wednesday. `fuckmemory` is a single temporal knowledge
-graph on your machine that all of them read and write through MCP.
+graph on your machine that all of them read and write through MCP — no cloud, no
+API keys, no LLM call in the write path, one 9 MB binary.
 
 ```console
 $ fuckmemory install
@@ -24,8 +33,6 @@ command   /home/you/.local/bin/fuckmemory
 Restart your agents so they pick up the new MCP server.
 ```
 
-No cloud. No API keys. No LLM call in the write path. One 9 MB binary.
-
 Turn on autosave and it stops depending on the agent's discipline entirely:
 every prompt you send is stored, and relevant memories are handed back on every
 prompt, whether or not the model thought to ask.
@@ -37,26 +44,29 @@ $ fuckmemory install --autosave
 autosave  on — every prompt is stored, memories are injected back
 ```
 
-## What's new in v1.1.1
+## Highlights
 
-- **Memory shared between agents, automatically.** One `fuckmemory install`
-  wires every agent on the machine to the *same* store. Claude Code remembers
-  something on Monday; OpenCode and Codex recall it on Tuesday. No per-agent
-  setup, no manual MCP configuration, one temporary graph on your disk.
-- **It does not depend on the model's discipline.** With `--autosave` the store
-  is involuntary: every prompt is kept and relevant memories are fed back into
-  every prompt, whether or not the agent thought to call a tool.
+- **Shared across agents, automatically.** One `install` wires every agent on
+  the machine to the *same* store. Claude Code remembers something on Monday;
+  OpenCode and Codex recall it on Tuesday. No per-agent setup, no manual MCP
+  configuration — one temporal graph on your disk.
+- **Involuntary memory.** With `--autosave`, every prompt is kept and relevant
+  memories are fed back into every prompt, whether or not the agent thought to
+  call a tool. Hooks reach Claude Code, Codex, Gemini CLI, Antigravity, Qwen,
+  Cursor and Copilot CLI.
 - **Instant writes.** No LLM runs in the write path — a `remember` is an INSERT
-  plus a static embedding, one round trip averaging **~5 ms** per prompt even
-  under autosave.
+  plus a static embedding, averaging **~5 ms** per prompt even under autosave.
 - **Fused retrieval that stays in budget.** BM25 + embeddings + graph votes are
   ranked by Reciprocal Rank Fusion, deduped by MMR, and hard-capped at a token
   budget, so recall never floods a context window.
+- **Memories point at files.** `remember` attaches the file a memory was learned
+  against (path + line range + bounded snippet), so recall shows you *where* a
+  convention lives, not just that it exists.
 - **Time travel.** Every fact has two time axes; `--as-of` answers what you
   believed on any past date even after the fact was overwritten.
-- **The details that keep it fast**: an mmap'd f16 embedding cache (≈1 ms cold
-  start, verified to cosine 0.999999 against the reference model) and a `tui`
-  for settings, agents and memories.
+- **Self-managing.** `fuckmemory update` upgrades itself, `doctor --fix` repairs
+  a broken install, and one `curl | bash` line installs everything with autosave
+  on.
 - **Owned by you.** One database, one model, one config directory; `uninstall`
   reverses every byte `install` wrote.
 
@@ -93,8 +103,6 @@ Graphiti model, without Neo4j.
 
 ## Install
 
-Needs Rust 1.85+ (`rustup` from https://rustup.rs).
-
 **The one-liner** (no Rust toolchain, no clone) — installs the newest prebuilt
 binary and wires every detected agent, autosave included:
 
@@ -117,7 +125,7 @@ directly. Assets are named `fuckmemory-<target>.tar.gz` (Unix) or
 
 Then run `fuckmemory install` to wire your agents.
 
-Or build from source:
+Or build from source (needs Rust 1.85+ — `rustup` from https://rustup.rs):
 
 ```bash
 git clone https://github.com/dalsori/fuckmemory && cd fuckmemory
@@ -131,9 +139,8 @@ cargo install --path .
 fuckmemory install          # detect agents, register, download the model
 ```
 
-Pick one of the two — they install to different directories (`~/.local/bin` and
-`~/.cargo/bin`), and if both exist, PATH order decides which one your agents
-actually run. `install.sh` deletes the `~/.cargo/bin` copy for that reason.
+`cargo install` drops the binary in `~/.cargo/bin`; `install.sh` uses
+`~/.local/bin` and removes the `~/.cargo/bin` copy so the two never drift apart.
 
 `install` is idempotent, backs up every file it edits, and `fuckmemory uninstall`
 reverses it. Add `--dry-run` to see the plan first.
@@ -165,12 +172,13 @@ fuckmemory update --check      # report what's available without touching anythi
 remote tag is newer than the running version, and swaps the binary in place —
 no manual `curl`, no knowing the version number.
 
-Or pull just the newest binary from a release by hand:
+Or pull the newest binary from a release by hand (replace `1.1.2` with the
+latest version number):
 
 **Linux / macOS:**
 
 ```bash
-ver=1.1.1                                        # or whatever is latest
+ver=1.1.2                                        # or whatever is latest
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)              target=x86_64-unknown-linux-gnu ;;
   Linux-aarch64|Linux-arm64) target=aarch64-unknown-linux-gnu ;;
@@ -186,7 +194,7 @@ install -m 755 /tmp/fuckmemory ~/.local/bin/fuckmemory
 **Windows (PowerShell):**
 
 ```powershell
-$ver = "1.1.1"   # or whatever is latest
+$ver = "1.1.2"   # or whatever is latest
 $target = "x86_64-pc-windows-msvc"
 Invoke-WebRequest `
   "https://github.com/dalsori/fuckmemory/releases/download/v$ver/fuckmemory-$target.zip" `
@@ -437,6 +445,7 @@ fuckmemory tui                     # interactive settings, agents, memories
 fuckmemory agents                  # what's installed, and where it's configured
 fuckmemory doctor                  # paths, schema, model, cache, registrations
 fuckmemory doctor --fix            # repair what the check finds, automatically
+fuckmemory update [--check]        # upgrade this binary from the latest release
 
 fuckmemory hook prompt|session-end [--agent id] [--text ...]
                                    # agents call this; reads the payload on stdin
@@ -544,10 +553,12 @@ fuckmemory consolidate && fuckmemory prune --days 90
   they share a `src` + single-valued `rel`.
 - **Kimi Code** is detected but its MCP config format is unverified, so a snippet
   is printed rather than a guess written into a real config file.
-- **Autosave only reaches Claude Code so far.** It is the one agent whose hook
-  format is documented and verified; the others get the MCP tools but no
-  involuntary path. `fuckmemory hook prompt` reads plain text on stdin as well as
-  hook JSON, so any agent that can pipe a message into a command can use it today.
+- **Not every agent's hook carries context back.** Autosave reaches Claude Code,
+  Codex, Gemini CLI, Antigravity, Qwen, Cursor and Copilot CLI; recall injection
+  works through the ones whose hook channel accepts context (Claude Code, Codex,
+  Qwen, Gemini, Antigravity). Cursor and Copilot CLI autosave every prompt but
+  ignore injected context, so autorecall there relies on the model calling the
+  MCP tools.
 - **Salience is marker-based.** No model runs in the write path, so a rule phrased
   without any of the markers ("the replica lags by an hour") is kept as an
   episode, not promoted to a fact. Recall reads facts; `recall --raw` reads both.
@@ -558,16 +569,17 @@ fuckmemory consolidate && fuckmemory prune --days 90
 ## Development
 
 ```bash
-cargo test                  # 136 tests: 117 unit, 19 integration
+cargo test                  # 161 tests: 140 unit, 21 integration
 cargo build --release
 ```
 
 The integration tests drive the real binary as a subprocess — including a live
-MCP handshake over stdio, eight concurrent writers, and eight processes racing to
-migrate a fresh database. Those caught the bugs that mattered, none of which a unit test would have found:
-deferred transactions returning `SQLITE_BUSY` under concurrent writes, a
-non-transactional migration, and `busy_timeout` being set after the one pragma
-that needed it. End-to-end runs against a real store caught two more: the vector
+MCP handshake over stdio, eight concurrent writers, and eight processes racing
+to migrate a fresh database. Those caught the bugs that mattered, none of which
+a unit test would have found: deferred transactions returning `SQLITE_BUSY`
+under concurrent writes, a non-transactional migration, and `busy_timeout` being
+set after the one pragma that needed it. End-to-end runs against a real store
+caught two more: the vector
 leg ignoring the temporal filter (so `--as-of` silently returned today's beliefs),
 and `AtomicI64::fetch_update` returning the *previous* value, which made the first
 `now()` of every process return 0. Adding autosave surfaced one more: `PRAGMA

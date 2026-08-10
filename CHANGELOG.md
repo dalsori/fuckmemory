@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One-command install.** `curl … | bash` downloads the newest prebuilt
+  binary, installs it to `~/.local/bin`, and wires every detected agent with
+  autosave on — no Rust toolchain, no clone, no manual download. From a repo
+  checkout the same script still builds from source. `--no-autosave` opts out.
 - **`fuckmemory doctor --fix` repairs the install.** The check now records every
   problem it finds, and `--fix` acts on them: rebuilds a missing/drifted FTS
   index, fetches the embedding model and builds the fast cache, re-embeds facts

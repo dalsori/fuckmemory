@@ -95,14 +95,16 @@ Graphiti model, without Neo4j.
 
 Needs Rust 1.85+ (`rustup` from https://rustup.rs).
 
+**The one-liner** (no Rust toolchain, no clone) — installs the newest prebuilt
+binary and wires every detected agent, autosave included:
+
 ```bash
-git clone https://github.com/dalsori/fuckmemory && cd fuckmemory
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/dalsori/fuckmemory/master/install.sh | bash
 ```
 
-Or grab a prebuilt binary for your platform from the
-[releases](https://github.com/dalsori/fuckmemory/releases) (no Rust toolchain
-needed). Assets are named `fuckmemory-<target>.tar.gz` (Unix) or
+Add `--no-autosave` to skip the per-prompt hooks. Or grab a prebuilt binary for
+your platform from the [releases](https://github.com/dalsori/fuckmemory/releases)
+directly. Assets are named `fuckmemory-<target>.tar.gz` (Unix) or
 `fuckmemory-<target>.zip` (Windows):
 
 | Target | When |
@@ -114,6 +116,13 @@ needed). Assets are named `fuckmemory-<target>.tar.gz` (Unix) or
 | `x86_64-pc-windows-msvc` | Windows x86_64 |
 
 Then run `fuckmemory install` to wire your agents.
+
+Or build from source:
+
+```bash
+git clone https://github.com/dalsori/fuckmemory && cd fuckmemory
+./install.sh
+```
 
 Or manually:
 

@@ -176,6 +176,49 @@ pub fn open_memory() -> Result<Connection> {
     Ok(conn)
 }
 
+/// Rebuild the FTS5 indexes (`facts_fts`, `episodes_fts`) from the base tables.
+///
+/// Used by `doctor --fix` when an index is missing or drifted out of sync. Drops
+/// the two virtual tables, re-runs the DDL (triggers included) and repopulates
+/// them in a single transaction, so a crash leaves the old state intact.
+pub fn rebuild_fts(conn: &Connection) -> Result<()> {
+    let fts_ddl: Vec<&str> = MIGRATIONS
+        .iter()
+        .flat_map(|m| m.split(';'))
+        .map(str::trim)
+        .filter(|s| s.contains("CREATE VIRTUAL TABLE") && s.contains("_fts"))
+        .collect();
+    if fts_ddl.len() != 2 {
+        anyhow::bail!(
+            "expected 2 FTS tables in the schema, found {}",
+            fts_ddl.len()
+        );
+    }
+    conn.execute_batch("BEGIN;")?;
+    let r = (|| -> Result<()> {
+        conn.execute("DROP TABLE IF EXISTS facts_fts", [])?;
+        conn.execute("DROP TABLE IF EXISTS episodes_fts", [])?;
+        for ddl in &fts_ddl {
+            conn.execute_batch(ddl)?;
+        }
+        conn.execute(
+            "INSERT INTO facts_fts(rowid, statement) SELECT id, statement FROM facts",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO episodes_fts(rowid, body) SELECT id, body FROM episodes",
+            [],
+        )?;
+        Ok(())
+    })();
+    if r.is_err() {
+        let _ = conn.execute_batch("ROLLBACK;");
+        return r;
+    }
+    conn.execute_batch("COMMIT;")?;
+    Ok(())
+}
+
 fn tune(conn: &Connection) -> Result<()> {
     // FIRST, before any other pragma. Switching journal mode needs the database
     // lock, so when several agents open a fresh store at the same moment they all
@@ -330,5 +373,47 @@ mod tests {
             meta_get(&conn, "schema_version").unwrap().as_deref(),
             Some("1")
         );
+    }
+
+    #[test]
+    fn rebuild_fts_repopulates_after_dropping_tables() {
+        let conn = open_memory().unwrap();
+        conn.execute_batch("BEGIN;").unwrap();
+        conn.execute_batch(
+            "INSERT INTO scopes(key, label, root, created_at) VALUES('s','s','/tmp/x',0);",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO entities(scope_id, name, norm, recorded_at) VALUES(1,'pnpm','pnpm',0);",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO facts(scope_id, src, rel, statement, hash, recorded_at)
+             VALUES(1, 1, 'uses', 'we use pnpm for everything', x'aa', 0);",
+        )
+        .unwrap();
+        conn.execute_batch("COMMIT;").unwrap();
+
+        // Kill the index as a corrupt install might, then rebuild.
+        conn.execute_batch("DROP TABLE facts_fts; DROP TABLE episodes_fts;")
+            .unwrap();
+        assert!(
+            conn.query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name='facts_fts'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap()
+                == 0
+        );
+        rebuild_fts(&conn).unwrap();
+        let hits: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM facts_fts WHERE facts_fts MATCH 'pnpm'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1);
     }
 }

@@ -179,7 +179,12 @@ enum Cmd {
     /// List memory scopes
     Scopes,
     /// Check the install: paths, model, schema, registrations
-    Doctor,
+    Doctor {
+        /// Repair what the check finds: rebuild missing FTS indexes, fetch the
+        /// model and cache, re-embed, wire detected agents, consolidate
+        #[arg(long)]
+        fix: bool,
+    },
     /// Merge duplicates, close contradictions, compact the indexes
     Consolidate {
         #[arg(long, default_value_t = 500)]
@@ -315,7 +320,7 @@ fn run() -> Result<()> {
         } => cmd_timeline(&cfg, entity, limit, scope),
         Cmd::Stats { json } => cmd_stats(&cfg, json),
         Cmd::Scopes => cmd_scopes(&cfg),
-        Cmd::Doctor => cmd_doctor(&cfg),
+        Cmd::Doctor { fix } => cmd_doctor(&cfg, fix),
         Cmd::Consolidate { limit } => cmd_consolidate(&cfg, limit),
         Cmd::Prune { days, dry_run } => {
             let conn = db::open(&cfg.db_path())?;
@@ -1021,7 +1026,10 @@ fn cmd_scopes(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-fn cmd_doctor(cfg: &Config) -> Result<()> {
+fn cmd_doctor(cfg: &Config, fix: bool) -> Result<()> {
+    // Collect what needs fixing first, so `--fix` can act on all of it.
+    let mut problems: Vec<String> = Vec::new();
+
     println!("home      {}", cfg.home.display());
     println!("database  {}", cfg.db_path().display());
     println!(
@@ -1070,7 +1078,12 @@ fn cmd_doctor(cfg: &Config) -> Result<()> {
             |r| r.get::<_, i64>(0),
         )
         .map(|n| n > 0)?;
-    println!("fts5      {}", if fts { "ok" } else { "MISSING" });
+    if fts {
+        println!("fts5      ok");
+    } else {
+        println!("fts5      MISSING");
+        problems.push("fts index missing — rebuild it".into());
+    }
     println!(
         "semantic  {}",
         if cfg.semantic {
@@ -1094,11 +1107,15 @@ fn cmd_doctor(cfg: &Config) -> Result<()> {
                     if ok {
                         ""
                     } else {
+                        problems.push("embeddings mismatch the model — re-embed".into());
                         "  ← MISMATCH with stored vectors, run `fuckmemory reindex`"
                     }
                 );
             }
-            None => println!("dims      n/a — run `fuckmemory model pull`"),
+            None => {
+                problems.push("embedding model not cached — pull and build the cache".into());
+                println!("dims      n/a — run `fuckmemory model pull`")
+            }
         }
     }
 
@@ -1108,21 +1125,25 @@ fn cmd_doctor(cfg: &Config) -> Result<()> {
         s.facts_live, s.facts_invalid, s.entities, s.pending
     );
     if s.facts_live > 0 && s.vectors == 0 && cfg.semantic {
+        problems.push("facts have no embeddings — re-embed".into());
         println!("          ← facts have no embeddings; run `fuckmemory reindex`");
+    }
+    if s.pending > 0 {
+        problems.push(format!("{} episode(s) awaiting consolidation", s.pending));
     }
 
     println!("\nagents");
-    let home = home()?;
+    let home_dir = home()?;
     let mut any = false;
     for a in install::AGENTS {
-        if !install::detect(a, &home) {
+        if !install::detect(a, &home_dir) {
             continue;
         }
         any = true;
         let wired = a
             .global_mcp
             .iter()
-            .map(|p| home.join(p))
+            .map(|p| home_dir.join(p))
             .find(|p| p.exists())
             .map(|p| {
                 std::fs::read_to_string(&p)
@@ -1134,7 +1155,7 @@ fn cmd_doctor(cfg: &Config) -> Result<()> {
         // here means nothing if no hook was ever written into the agent.
         let hooked = a
             .hooks
-            .map(|(rel, _)| home.join(rel))
+            .map(|(rel, _)| home_dir.join(rel))
             .and_then(|p| std::fs::read_to_string(p).ok())
             .map(|t| t.contains(" hook prompt --agent "))
             .unwrap_or(false);
@@ -1150,8 +1171,10 @@ fn cmd_doctor(cfg: &Config) -> Result<()> {
                 (false, _, _) => "n/a (agent has no hook support)".to_string(),
                 (true, true, true) => "wired".to_string(),
                 (true, true, false) => "wired, but disabled in settings".to_string(),
-                (true, false, true) =>
-                    "ENABLED BUT NOT WIRED — run `fuckmemory install`".to_string(),
+                (true, false, true) => {
+                    problems.push(format!("{} autosave on but hooks not wired", a.id));
+                    "ENABLED BUT NOT WIRED — run `fuckmemory install`".to_string()
+                }
                 (true, false, false) => "off".to_string(),
             }
         );
@@ -1159,6 +1182,94 @@ fn cmd_doctor(cfg: &Config) -> Result<()> {
     if !any {
         println!("  (none detected)");
     }
+
+    if !fix {
+        return Ok(());
+    }
+
+    // --fix: repair everything the check flagged, then let the user re-check.
+    if problems.is_empty() {
+        println!("\nfix: nothing to do");
+        return Ok(());
+    }
+    println!("\nfix: repairing {} issue(s)", problems.len());
+
+    let mut conn = db::open(&cfg.db_path())?;
+    let fts = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'facts_fts'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)?;
+    if !fts {
+        println!("  · rebuilding the FTS index");
+        db::rebuild_fts(&conn)?;
+    }
+
+    if cfg.semantic && Embedder::load_if_cached(cfg).is_none() {
+        println!("  · fetching the embedding model");
+        fuckmemory::embed::prefetch(cfg)?;
+        println!("  · building the fast cache");
+        fuckmemory::embed::build_cache(cfg, false)?;
+    }
+
+    let s = store::stats(&conn)?;
+    let reembed = if let Some(e) = Embedder::load_if_cached(cfg) {
+        !fuckmemory::embed::model_matches(&conn, cfg, e.dim)?
+    } else {
+        false
+    } || (s.facts_live > 0 && s.vectors == 0 && cfg.semantic);
+    if reembed {
+        println!("  · re-embedding facts");
+        let emb = Embedder::load(cfg)?;
+        consolidate::reindex(&mut conn, &emb)?;
+    }
+
+    if s.pending > 0 {
+        println!("  · consolidating {} episode(s)", s.pending);
+        let emb = cached_embedder(cfg);
+        let r = consolidate::run(&mut conn, cfg, emb.as_ref(), s.pending as usize)?;
+        println!("    merged {} duplicate fact(s)", r.facts_merged);
+    }
+
+    // Wire any detected agent whose hooks are enabled but missing. Runs the
+    // same idempotent path as `install`, restricted to what's broken.
+    let home_dir = home()?;
+    let broken: Vec<String> = install::AGENTS
+        .iter()
+        .filter(|a| install::detect(a, &home_dir))
+        .filter(|a| {
+            a.hooks.is_some() && (cfg.autosave || cfg.autorecall) && {
+                let hooked = a.hooks.map(|(rel, _)| home_dir.join(rel));
+                hooked
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+                    .map(|t| !t.contains(" hook prompt --agent "))
+                    .unwrap_or(true)
+            }
+        })
+        .map(|a| a.id.to_string())
+        .collect();
+    if !broken.is_empty() {
+        println!("  · wiring hooks into: {}", broken.join(", "));
+        install::apply(
+            &home_dir,
+            &install::Options {
+                command: std::env::current_exe()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "fuckmemory".into()),
+                global: true,
+                project: None,
+                only: Some(broken),
+                instructions: false,
+                hooks: true,
+                dry_run: false,
+            },
+            false,
+        )?;
+    }
+
+    println!("\nrun `fuckmemory doctor` again to confirm everything is green.");
     Ok(())
 }
 

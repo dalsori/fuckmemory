@@ -422,6 +422,7 @@ fuckmemory uninstall
 fuckmemory tui                     # interactive settings, agents, memories
 fuckmemory agents                  # what's installed, and where it's configured
 fuckmemory doctor                  # paths, schema, model, cache, registrations
+fuckmemory doctor --fix            # repair what the check finds, automatically
 
 fuckmemory hook prompt|session-end [--agent id] [--text ...]
                                    # agents call this; reads the payload on stdin

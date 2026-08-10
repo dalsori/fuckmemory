@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`fuckmemory doctor --fix` repairs the install.** The check now records every
+  problem it finds, and `--fix` acts on them: rebuilds a missing/drifted FTS
+  index, fetches the embedding model and builds the fast cache, re-embeds facts
+  that have no vectors, consolidates pending episodes, and re-wires hooks into
+  agents that have autosave enabled but no hook configured.
 - **`fuckmemory update` self-updates.** One command checks the latest GitHub
   release, downloads the asset for your platform, and atomically replaces the
   running binary — no shell, no manual download, no knowing the version number.

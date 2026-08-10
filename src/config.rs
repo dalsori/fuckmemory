@@ -118,6 +118,12 @@ impl Config {
         self.home.join("models")
     }
 
+    /// Where persisted vector indexes live, so a one-shot process can open one
+    /// with mmap instead of re-reading every vector out of SQLite.
+    pub fn index_cache_dir(&self) -> PathBuf {
+        self.home.join("index-cache")
+    }
+
     /// Local folder for the configured model, e.g.
     /// `~/.local/share/fuckmemory/models/minishlab__potion-retrieval-32M`.
     pub fn model_dir(&self) -> PathBuf {

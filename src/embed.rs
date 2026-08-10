@@ -288,7 +288,13 @@ pub struct VecIndex {
 #[derive(Debug)]
 enum IndexData {
     Owned(Vec<i8>),
-    Mapped(memmap2::Mmap),
+    /// The full file mapping, plus the byte offset where the vector rows start.
+    /// The mapping covers header + ids + rows; `rows()` slices from `data_off`
+    /// so only the matrix is ever treated as vectors.
+    Mapped {
+        map: memmap2::Mmap,
+        data_off: usize,
+    },
 }
 
 impl IndexData {
@@ -299,10 +305,16 @@ impl IndexData {
     fn rows(&self) -> &[i8] {
         match self {
             IndexData::Owned(v) => v,
-            IndexData::Mapped(m) => {
+            IndexData::Mapped { map, data_off } => {
                 // SAFETY: u8 and i8 have identical layout; the mapping was sized
-                // and validated against the header before being stored.
-                unsafe { std::slice::from_raw_parts(m.as_ptr().cast::<i8>(), m.len()) }
+                // and validated against the header before being stored, and
+                // `data_off` points at the start of the row matrix.
+                unsafe {
+                    std::slice::from_raw_parts(
+                        map.as_ptr().add(*data_off).cast::<i8>(),
+                        map.len() - *data_off,
+                    )
+                }
             }
         }
     }
@@ -382,14 +394,16 @@ impl VecIndex {
             let bytes = &mmap[ids_off..data_off];
             // SAFETY: validated alignment (ids start at offset 64) and length
             // (`n * 8` fits before data_off, itself validated above).
-            let slice =
-                unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<i64>(), n) };
+            let slice = unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<i64>(), n) };
             slice.to_vec()
         };
         Some(Self {
             dim,
             ids,
-            data: IndexData::Mapped(mmap),
+            data: IndexData::Mapped {
+                map: mmap,
+                data_off,
+            },
         })
     }
 

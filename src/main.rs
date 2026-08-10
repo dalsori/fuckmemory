@@ -873,6 +873,9 @@ fn cmd_recall(
         None => When::Live,
     };
 
+    // One-shot process: reuse a persisted, mmap'd index when the store version
+    // hasn't changed, instead of re-reading every vector on this recall.
+    let mut cache = VecCache::with_dir(cfg.index_cache_dir());
     let r = retrieve::recall(
         &conn,
         &scope_ids,
@@ -884,7 +887,7 @@ fn cmd_recall(
             hops: hops.min(2),
             include_episodes: raw,
         },
-        None,
+        Some(&mut cache),
     )?;
 
     if json {
@@ -1197,6 +1200,29 @@ fn cmd_bench(cfg: &Config, facts: usize, rounds: usize, queries: usize) -> Resul
         hot_recall_us.push(t.elapsed().as_micros() / queries.max(1) as u128);
     }
 
+    // Third pass: a fresh on-disk cache each round, like separate one-shot
+    // processes would. First round pays the write; the rest should hit mmap.
+    let mut disk_recall_us = Vec::new();
+    let disk_dir = dir.join("idx");
+    for _ in 0..rounds {
+        let mut dc = VecCache::with_dir(disk_dir.clone());
+        let t = Instant::now();
+        for q in &queries_pool {
+            retrieve::recall(
+                &conn,
+                &scope_ids,
+                emb_ref,
+                &Query {
+                    text: q.clone(),
+                    limit: 6,
+                    ..Default::default()
+                },
+                Some(&mut dc),
+            )?;
+        }
+        disk_recall_us.push(t.elapsed().as_micros() / queries.max(1) as u128);
+    }
+
     println!(
         "seed       {:>7} ms total ({:.2} ms/fact)",
         seed_us / 1000,
@@ -1217,6 +1243,10 @@ fn cmd_bench(cfg: &Config, facts: usize, rounds: usize, queries: usize) -> Resul
     println!(
         "recall hot {:>7} µs median  (in-process vector cache)",
         median_us(&hot_recall_us) as u64,
+    );
+    println!(
+        "recall disk {:>6} µs median  (persisted, mmap'd index)",
+        median_us(&disk_recall_us) as u64,
     );
 
     let _ = std::fs::remove_dir_all(&dir);

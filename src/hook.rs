@@ -25,7 +25,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use crate::config::Config;
-use crate::embed::Embedder;
+use crate::embed::{Embedder, VecCache};
 use crate::pack::{self, PackOptions};
 use crate::retrieve::{self, Query};
 use crate::store::{self, RememberInput};
@@ -226,6 +226,10 @@ pub fn run(
     );
     if cfg.autorecall && worth_recalling {
         let scope_ids = scope::read_set(&conn, &sc)?;
+        // One-shot process: a persisted, mmap'd index keeps the SQLite read out
+        // of every prompt. The cache is only valid while data_version matches,
+        // which the VecCache checks itself.
+        let mut cache = VecCache::with_dir(cfg.index_cache_dir());
         let r = retrieve::recall(
             &conn,
             &scope_ids,
@@ -235,7 +239,7 @@ pub fn run(
                 limit: cfg.autorecall_limit.max(1),
                 ..Default::default()
             },
-            None,
+            Some(&mut cache),
         )?;
         let rendered = pack::render(
             &r,

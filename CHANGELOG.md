@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with and without the embedding model, plus the steady-state "hot cache" number
   a running MCP server pays. `./bench.sh` wraps it into a markdown table + ASCII
   chart annotated with the machine, so the README's numbers are reproducible.
+- **Repository polish for reach.** A custom social-preview image (the link
+  preview on GitHub and social networks), a `FUNDING.yml`, and issue/PR
+  templates.
 
 ## [1.1.2] - 2026-08-09
 

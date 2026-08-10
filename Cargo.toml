@@ -1,6 +1,6 @@
 [package]
 name = "fuckmemory"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2021"
 rust-version = "1.85"
 description = "Local-first temporal knowledge-graph memory shared by every AI coding agent you use"

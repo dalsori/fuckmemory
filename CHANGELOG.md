@@ -4,34 +4,34 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.2] - 2026-08-09
 
 ### Added
 
-- **One-command install.** `curl … | bash` downloads the newest prebuilt
-  binary, installs it to `~/.local/bin`, and wires every detected agent with
-  autosave on — no Rust toolchain, no clone, no manual download. From a repo
-  checkout the same script still builds from source. `--no-autosave` opts out.
-- **`fuckmemory doctor --fix` repairs the install.** The check now records every
-  problem it finds, and `--fix` acts on them: rebuilds a missing/drifted FTS
-  index, fetches the embedding model and builds the fast cache, re-embeds facts
-  that have no vectors, consolidates pending episodes, and re-wires hooks into
-  agents that have autosave enabled but no hook configured.
-- **`fuckmemory update` self-updates.** One command checks the latest GitHub
-  release, downloads the asset for your platform, and atomically replaces the
-  running binary — no shell, no manual download, no knowing the version number.
-  `fuckmemory update --check` reports without touching anything.
+- **Memories point at files.** `remember` accepts `files` — a path plus an
+  optional line range, or a ready-made snippet — and stores a bounded excerpt of
+  the file a memory was learned against. Recall shows the path (backticked, with
+  the line range) next to the fact, and `--debug` reveals the stored excerpt with
+  its detected language. CLI: `fuckmemory remember … --file PATH[:FROM-TO]`.
 - **Antigravity autosave + auto-recall.** `install --autosave` now also wires
   hooks into Antigravity CLI (`~/.gemini/config/hooks.json` and
   `.agents/hooks.json`, `PreInvocation`/`Stop` events, named-map shape). Its
   prompt event does not carry the prompt text, so `hook prompt` reads the most
   recent user request back from the conversation transcript, and context is
   injected as an `ephemeralMessage` step.
-- **Memories point at files.** `remember` accepts `files` — a path plus an
-  optional line range, or a ready-made snippet — and stores a bounded excerpt of
-  the file a memory was learned against. Recall shows the path (backticked, with
-  the line range) next to the fact, and `--debug` reveals the stored excerpt with
-  its detected language. CLI: `fuckmemory remember … --file PATH[:FROM-TO]`.
+- **`fuckmemory update` self-updates.** One command checks the latest GitHub
+  release, downloads the asset for your platform, and atomically replaces the
+  running binary — no shell, no manual download, no knowing the version number.
+  `fuckmemory update --check` reports without touching anything.
+- **`fuckmemory doctor --fix` repairs the install.** The check now records every
+  problem it finds, and `--fix` acts on them: rebuilds a missing/drifted FTS
+  index, fetches the embedding model and builds the fast cache, re-embeds facts
+  that have no vectors, consolidates pending episodes, and re-wires hooks into
+  agents that have autosave enabled but no hook configured.
+- **One-command install.** `curl … | bash` downloads the newest prebuilt
+  binary, installs it to `~/.local/bin`, and wires every detected agent with
+  autosave on — no Rust toolchain, no clone, no manual download. From a repo
+  checkout the same script still builds from source. `--no-autosave` opts out.
 
 ### Changed
 

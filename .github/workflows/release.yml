@@ -3,6 +3,11 @@ name: Release
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to rebuild assets for"
+        required: true
 
 permissions:
   contents: write
@@ -53,6 +58,16 @@ jobs:
       - name: Upload assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
+          # The `release: published` event can fire before the release is
+          # queryable through the API, which makes `gh release upload` fail with
+          # "release not found". Wait for it, with a hard cap.
+          for i in $(seq 1 20); do
+            if gh release view "$TAG" --json id >/dev/null 2>&1; then
+              break
+            fi
+            echo "release $TAG not visible yet, waiting ($i/20)…"
+            sleep 15
+          done
           gh release upload "$TAG" dist/* --clobber

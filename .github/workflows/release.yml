@@ -45,16 +45,18 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          mkdir -p dist
-          cp target/release/fuckmemory dist/fuckmemory
-          tar -czf dist/fuckmemory-${{ matrix.target }}.tar.gz -C dist fuckmemory
+          mkdir -p dist/pkg
+          cp target/release/fuckmemory dist/pkg/fuckmemory
+          tar -czf "dist/fuckmemory-${{ matrix.target }}.tar.gz" -C dist/pkg fuckmemory
+          rm -rf dist/pkg
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/fuckmemory.exe dist/fuckmemory.exe
-          Compress-Archive -Path dist/fuckmemory.exe -DestinationPath dist/fuckmemory-${{ matrix.target }}.zip
+          New-Item -ItemType Directory -Force dist/pkg | Out-Null
+          Copy-Item target/release/fuckmemory.exe dist/pkg/fuckmemory.exe
+          Compress-Archive -Path dist/pkg/fuckmemory.exe -DestinationPath "dist/fuckmemory-${{ matrix.target }}.zip"
+          Remove-Item -Recurse -Force dist/pkg
       - name: Upload assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

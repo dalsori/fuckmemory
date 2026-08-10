@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`fuckmemory bench` measures write and recall latency.** Seeds a throwaway
+  store with N facts, then reports median write (`remember`) and recall timings
+  with and without the embedding model, plus the steady-state "hot cache" number
+  a running MCP server pays. `./bench.sh` wraps it into a markdown table + ASCII
+  chart annotated with the machine, so the README's numbers are reproducible.
+
 ## [1.1.2] - 2026-08-09
 
 ### Added

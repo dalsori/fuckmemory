@@ -422,18 +422,34 @@ Building the cache costs 0.5 s once per model and 62 MB on disk; `install` and
 `model pull` do it for you. `fuckmemory model verify` re-checks it against the
 model, and `FUCKMEMORY_FAST=0` turns the whole thing off.
 
-## Measured
+## Benchmarks
 
-Release build, 10,000 facts, one WSL2 core:
+Reproducible with `fuckmemory bench` (or `./bench.sh`, which prints this table
+and an ASCII chart plus the machine it measured). All timings are medians over
+30 rounds on a throwaway store in the temp dir — your real database is never
+touched. 10,000 facts, release build:
 
-| | |
-|---|---|
-| Binary | 9 MB, no runtime dependencies |
-| Recall, in-process | **9–17 ms** (BM25 ~9 ms, vector leg ~5 ms, graph hop ~4 ms) |
-| Recall, keyword-only | 8–10 ms |
-| Recall, whole CLI process | 4 ms |
-| Import + embed 10k facts | 12 s (~1.2 ms each, debug build) |
-| Database | 8.8 MB for 10k facts including vectors |
+| metric | semantic on | semantic off |
+|---|---|---|
+| write (per `remember`) | **172 µs** | 141 µs |
+| recall (per query) | 14.5 ms | 7.7 ms |
+| recall, hot cache | 9.8 ms | — |
+
+```
+write                        172 µs ▕█
+recall                     14506 µs ▕█████████████████████████████
+recall (hot)                9833 µs ▕███████████████████
+```
+
+The `recall` line is the cold path — every query re-reads the vector index from
+SQLite because the process is one-shot. The `hot cache` line is what a running
+MCP server pays, where the index stays in process and only reloads when
+`data_version` says another agent wrote. Seeding those 10,000 facts costs
+~0.3 ms each, and a full `remember` (INSERT + static embedding) is under a
+quarter of a millisecond.
+
+Measured on an AMD Ryzen 7 7445HS (12 cores), Linux x86_64, 2026-08-10. To get
+your own numbers: `fuckmemory bench` or `./bench.sh`.
 
 ## CLI
 
@@ -460,6 +476,7 @@ fuckmemory timeline <entity>
 fuckmemory explain <query>         # per-retriever breakdown
 
 fuckmemory stats | scopes
+fuckmemory bench [--facts N] [--rounds N] [--queries N]   # write/recall latency
 fuckmemory consolidate             # merge duplicates, compact indexes
 fuckmemory prune --days 90         # drop retracted, never-read facts
 fuckmemory reindex                 # re-embed after changing models

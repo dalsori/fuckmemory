@@ -58,6 +58,7 @@ jobs:
           Compress-Archive -Path dist/pkg/fuckmemory.exe -DestinationPath "dist/fuckmemory-${{ matrix.target }}.zip"
           Remove-Item -Recurse -Force dist/pkg
       - name: Upload assets
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.event.release.tag_name || inputs.tag }}

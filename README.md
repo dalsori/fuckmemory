@@ -110,7 +110,15 @@ binary and wires every detected agent, autosave included:
 curl -fsSL https://raw.githubusercontent.com/dalsori/fuckmemory/master/install.sh | bash
 ```
 
-Add `--no-autosave` to skip the per-prompt hooks. Or grab a prebuilt binary for
+Add `--no-autosave` to skip the per-prompt hooks. On macOS and Linux you can
+also install with Homebrew:
+
+```bash
+brew tap dalsori/fuckmemory
+brew install fuckmemory
+```
+
+Or grab a prebuilt binary for
 your platform from the [releases](https://github.com/dalsori/fuckmemory/releases)
 directly. Assets are named `fuckmemory-<target>.tar.gz` (Unix) or
 `fuckmemory-<target>.zip` (Windows):

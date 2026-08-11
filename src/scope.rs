@@ -7,7 +7,7 @@
 //! repo still gets your preferences.
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 use crate::config::now;
@@ -98,6 +98,17 @@ pub fn get(conn: &Connection, key: &str) -> Result<Option<Scope>> {
     } else {
         Ok(None)
     }
+}
+
+/// The filesystem root backing a scope, if any (`global` has none). Used to
+/// stamp episodes with the git HEAD at write time.
+pub fn root_of(conn: &Connection, scope_id: i64) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT root FROM scopes WHERE id = ?1", [scope_id], |r| {
+            r.get::<_, Option<String>>(0)
+        })
+        .optional()?
+        .flatten())
 }
 
 fn upsert(conn: &Connection, key: &str, label: &str, root: Option<&Path>) -> Result<Scope> {

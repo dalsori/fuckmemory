@@ -65,16 +65,40 @@ pub fn parse_when(s: &str) -> Option<i64> {
     Some((era * 146_097 + doe - 719_468) * DAY)
 }
 
-/// A fact's temporal annotation, or empty when it says nothing useful.
-fn when_note(f: &FactRow, now_ts: i64) -> String {
+/// A fact's provenance annotation, or empty when it says nothing useful.
+///
+/// The whole point of the shared store is that a reader can challenge the
+/// context it was handed. So each line carries, when available: when the fact
+/// was/remains true, who recorded it, and from what repository state — the
+/// answer to "who wrote this, and can I still trust it?" in one bracket.
+fn prov_note(f: &FactRow, now_ts: i64) -> String {
+    let mut parts: Vec<String> = Vec::new();
     let start = f.valid_from.unwrap_or(f.recorded_at);
     match (f.invalidated_at.is_some(), f.valid_to) {
-        (true, Some(end)) => format!(" [was true {} → {}]", ymd(start), ymd(end)),
-        (true, None) => format!(" [retracted, noted {}]", ymd(start)),
+        (true, Some(end)) => parts.push(format!("was true {} → {}", ymd(start), ymd(end))),
+        (true, None) => parts.push(format!("retracted, noted {}", ymd(start))),
         // Only date facts that aren't from the last couple of days; "since
         // yesterday" is noise.
-        (false, _) if now_ts - start > 2 * DAY => format!(" [since {}]", ymd(start)),
-        _ => String::new(),
+        (false, _) if now_ts - start > 2 * DAY => parts.push(format!("since {}", ymd(start))),
+        _ => {}
+    }
+    if let Some(src) = f.source.as_deref() {
+        if !src.is_empty() && src != "unknown" {
+            parts.push(format!("by {src}"));
+        }
+    }
+    if let Some(h) = f.head.as_deref() {
+        if !h.is_empty() {
+            parts.push(format!("@ {h}"));
+        }
+    }
+    if f.confidence < 1.0 {
+        parts.push(format!("conf {:.2}", f.confidence));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", parts.join(", "))
     }
 }
 
@@ -101,7 +125,7 @@ pub fn render(recall: &Recall, opts: &PackOptions, now_ts: i64) -> String {
         let mut line = format!(
             "- {}{}",
             h.fact.statement.trim(),
-            when_note(&h.fact, now_ts)
+            prov_note(&h.fact, now_ts)
         );
         if opts.debug {
             line.push_str(&format!("  ({:.4} via {})", h.score, h.via.join("+")));
@@ -201,6 +225,8 @@ mod tests {
             invalidated_at: None,
             hits: 0,
             episode_id: None,
+            source: None,
+            head: None,
         }
     }
 
@@ -353,6 +379,29 @@ mod tests {
         let out = render(&recall_of(vec![f]), &opts(500), now);
         assert!(out.contains("was true"), "got {out:?}");
         assert!(out.contains(" → "), "got {out:?}");
+    }
+
+    #[test]
+    fn provenance_source_head_and_confidence_render() {
+        let now = 1_800_000_000_000;
+        let mut f = fact(1, "deploy target is a make target", now - 100 * DAY);
+        f.source = Some("claude-code".into());
+        f.head = Some("ba85d94".into());
+        f.confidence = 0.7;
+        let out = render(&recall_of(vec![f]), &opts(500), now);
+        assert!(out.contains("since "), "got {out:?}");
+        assert!(out.contains("by claude-code"), "got {out:?}");
+        assert!(out.contains("@ ba85d94"), "got {out:?}");
+        assert!(out.contains("conf 0.70"), "got {out:?}");
+    }
+
+    #[test]
+    fn unknown_source_is_not_rendered() {
+        let now = 1_800_000_000_000;
+        let mut f = fact(1, "fresh thing", now);
+        f.source = Some("unknown".into());
+        let out = render(&recall_of(vec![f]), &opts(500), now);
+        assert!(!out.contains("by "), "got {out:?}");
     }
 
     #[test]

@@ -173,6 +173,12 @@ CREATE TABLE file_refs (
 CREATE INDEX file_refs_episode ON file_refs(episode_id);
 CREATE INDEX file_refs_path ON file_refs(path);
 "#,
+    // ---- v2 -----------------------------------------------------------------
+    // Provenance: the short git HEAD the repo was at when an episode was
+    // learned, so recall can answer "from what repository state".
+    r#"
+ALTER TABLE episodes ADD COLUMN head TEXT;
+"#,
 ];
 
 /// Open (creating if needed) the database at `path` and bring it up to date.

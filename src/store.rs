@@ -9,6 +9,7 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use crate::config::now;
 use crate::db::{self, VEC_EPISODE, VEC_FACT};
@@ -315,6 +316,13 @@ pub fn remember(
     let ep_hash = hash_text(&[&normalize(body)]);
     let meta_s = input.meta.as_ref().map(|m| m.to_string());
 
+    // Stamped once per new episode, not per fact, so a burst of facts about the
+    // same observation all point at one repository state.
+    let head = crate::scope::root_of(&tx, scope.id)?
+        .as_deref()
+        .map(Path::new)
+        .and_then(git_head);
+
     let existing: Option<i64> = tx
         .query_row(
             "SELECT id FROM episodes WHERE scope_id = ?1 AND hash = ?2",
@@ -327,8 +335,8 @@ pub fn remember(
         Some(id) => (id, true),
         None => {
             tx.execute(
-                "INSERT INTO episodes(scope_id, source, kind, body, meta, hash, recorded_at)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO episodes(scope_id, source, kind, body, meta, hash, recorded_at, head)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     scope.id,
                     input.source,
@@ -336,7 +344,8 @@ pub fn remember(
                     body,
                     meta_s,
                     ep_hash,
-                    ts
+                    ts,
+                    head
                 ],
             )?;
             (tx.last_insert_rowid(), false)
@@ -406,6 +415,31 @@ pub fn remember(
         superseded,
         duplicate,
     })
+}
+
+/// Best-effort short git HEAD for a directory, or None when it isn't a repo or
+/// git can't answer. Only spawns git when a `.git` marker exists, so a plain
+/// directory costs a single stat, not a subprocess — this runs on every write.
+fn git_head(root: &Path) -> Option<String> {
+    if !root.join(".git").exists() {
+        return None;
+    }
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?;
+    let head = s.trim();
+    if head.is_empty() {
+        None
+    } else {
+        Some(head.to_string())
+    }
 }
 
 /// Insert one fact edge. Returns the new id (None if an identical live fact
@@ -1040,5 +1074,69 @@ mod tests {
     #[test]
     fn read_file_input_fails_cleanly_on_missing_file() {
         assert!(read_file_input("nope.rs", Path::new("/definitely/missing"), None).is_err());
+    }
+
+    #[test]
+    fn remember_stamps_the_git_head_when_in_a_repo() {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "fm-head-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            return; // no git available; nothing to assert
+        }
+        std::fs::write(dir.join("f.txt"), "hi").unwrap();
+        assert!(git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "add",
+            "."
+        ]));
+        assert!(git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init"
+        ]));
+        let want = std::process::Command::new("git")
+            .arg("rev-parse")
+            .arg("--short")
+            .arg("HEAD")
+            .current_dir(&dir)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+        let mut conn = db::open_memory().unwrap();
+        let sc = scope::resolve(&conn, dir.to_str(), Path::new("/")).unwrap();
+        remember(&mut conn, &sc, None, &note("ci runs on node 22")).unwrap();
+
+        let head: Option<String> = conn
+            .query_row("SELECT head FROM episodes LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            head.as_deref(),
+            Some(want.as_str()),
+            "head must match repo HEAD"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

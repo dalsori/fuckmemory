@@ -368,11 +368,14 @@ agent's context window on every single turn.
 - **`timeline`** — how knowledge about one entity changed over time.
 
 A recall renders like this, hard-capped at a token budget. Memories that name a
-file show it backticked with the line range:
+file show it backticked with the line range. The bracketed note is provenance —
+**who** recorded the memory (`by claude-code`), **from what repository state**
+(`@ <commit>`, the short git HEAD at write time), **when** it was true or was
+retracted, and confidence when it isn't full:
 
 ```markdown
 ## Memory — myproject
-- deploys go out through fly.io, never vercel
+- deploys go out through fly.io, never vercel [by codex @ ab12cd0 since 2026-07-20]
     `Makefile`:1–6
 - the project uses pnpm now, npm left duplicate lockfiles [since 2026-03-14]
 - never commit with --no-verify, the pre-commit hook is the only formatter

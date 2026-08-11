@@ -22,14 +22,20 @@ pub struct FactRow {
     /// The episode this fact was derived from, when there is one. Used to look
     /// up the files the memory was learned against.
     pub episode_id: Option<i64>,
+    /// Which agent recorded the underlying episode ("claude-code", "cli", …),
+    /// when there is one. Lets the reader challenge who claims the fact.
+    pub source: Option<String>,
+    /// Short git HEAD of the repo at the moment it was learned, when in one.
+    pub head: Option<String>,
 }
 
 const SELECT_FACT: &str = "SELECT f.id, f.scope_id, se.name, f.rel, de.name, f.statement,
         f.confidence, f.valid_from, f.valid_to, f.recorded_at, f.invalidated_at, f.hits,
-        f.episode_id
+        f.episode_id, ep.source, ep.head
  FROM facts f
  LEFT JOIN entities se ON se.id = f.src
- LEFT JOIN entities de ON de.id = f.dst";
+ LEFT JOIN entities de ON de.id = f.dst
+ LEFT JOIN episodes ep ON ep.id = f.episode_id";
 
 fn map_fact(r: &Row) -> rusqlite::Result<FactRow> {
     Ok(FactRow {
@@ -46,6 +52,8 @@ fn map_fact(r: &Row) -> rusqlite::Result<FactRow> {
         invalidated_at: r.get(10)?,
         hits: r.get(11)?,
         episode_id: r.get(12)?,
+        source: r.get(13)?,
+        head: r.get(14)?,
     })
 }
 

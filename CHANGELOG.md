@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Recall shows provenance.** Every memory line now answers "who wrote this,
+  and from what state of the repo?" — the writing agent (`[by claude-code]`),
+  the short git HEAD at the moment it was learned (`[@ ba85d94]`, captured on
+  write when inside a repo), and the fact's confidence when below 1.0
+  (`[conf 0.70]`), alongside the existing date and retraction markers. An agent
+  that is handed a memory can therefore challenge it, not just absorb it.
 - **Published on crates.io.** `cargo install fuckmemory` now works; docs.rs
   builds the crate reference automatically.
 - **Ignore sensitive paths.** `[ignore] paths = [".env", "*.pem", "~/.aws/*"]`

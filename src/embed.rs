@@ -486,7 +486,7 @@ impl VecIndex {
 /// offset 0   magic   b"FMVECv01"  (8 bytes)
 /// offset 8   dim     u32
 /// offset 12  count   u32
-/// offset 16  version i64   — the `data_version` the index was built from
+/// offset 16  version i64   — the `index_version` the index was built from
 /// offset 24  key     [u8; 32]  — blake3 of (scope_ids, when)
 /// offset 56  layout  u32
 /// offset 60  reserved u32
@@ -506,7 +506,7 @@ const VEC_LAYOUT: u32 = 1;
 struct VecIndexFile {
     dim: u32,
     count: u32,
-    /// SQLite `data_version` this index was built against.
+    /// `index_version` this index was built against.
     version: i64,
     /// blake3 of the scope set + temporal window, so a different project or an
     /// `--as-of` query never reuses another query's index.
@@ -593,11 +593,12 @@ impl VecIndexFile {
 /// bottleneck. This keeps the most recently built index around and reuses it
 /// while the store provably unchanged.
 ///
-/// Validity is decided by `PRAGMA data_version` read on the *same* connection:
-/// it changes when any other connection commits — other processes (hooks, CLI)
-/// included — and not for writes made by this one. So external writes
-/// invalidate automatically, and the server must call [`VecCache::invalidate`]
-/// after its own `remember`/`forget`, which `data_version` cannot see.
+/// Validity is decided by `index_version` read on the *same* connection: it
+/// changes when another connection commits fact-vector content — other
+/// processes (hooks, CLI) included — and not for writes made by this one. So
+/// external writes invalidate automatically, and the server must call
+/// [`VecCache::invalidate`] after its own `remember`/`forget`, which the
+/// version bump on this connection does not propagate to the cached slot.
 ///
 /// One slot is enough. An agent tends to repeat the same question set, so
 /// consecutive recalls hit; a key change just rebuilds, which is no worse than
@@ -606,13 +607,13 @@ impl VecIndexFile {
 /// With [`VecCache::with_dir`], the index is also written to disk (mmap'd on
 /// open) so a one-shot process — an autosave hook, a CLI recall — pays the
 /// SQLite read once per store version instead of on every single invocation.
-/// A file for a stale `data_version` or a different key is ignored and
+/// A file for a stale `index_version` or a different key is ignored and
 /// rebuilt, exactly like the in-memory slot.
 #[derive(Debug, Default)]
 pub struct VecCache {
     /// The key the cached index was built for, if any.
     key: Option<(Vec<i64>, When)>,
-    /// `data_version` of this connection when the index was built.
+    /// `index_version` of this connection when the index was built.
     version: i64,
     idx: Option<VecIndex>,
     /// Where to persist the index, if anywhere.
@@ -641,9 +642,14 @@ impl VecCache {
     }
 
     /// The index for these scopes at `when`: the cached one when it is fresh,
-    /// otherwise a reload that replaces the cache.
+    /// otherwise a reload that replaces the cache. Validity is decided by
+    /// `index_version` rather than `PRAGMA data_version`: the latter changes on
+    /// *any* write from another connection, including the `mark_hits` popularity
+    /// counter every autosave prompt performs — which would rebuild the mmap
+    /// cache on every prompt even when no fact changed. `index_version` only
+    /// moves when the facts behind the index actually change.
     pub fn index(&mut self, conn: &Connection, scope_ids: &[i64], when: When) -> Result<&VecIndex> {
-        let version = data_version(conn)?;
+        let version = db::index_version(conn)?;
         let key = (scope_ids.to_vec(), when);
         let fresh =
             self.key.as_ref() == Some(&key) && self.version == version && self.idx.is_some();
@@ -683,7 +689,7 @@ impl VecCache {
     }
 
     /// Open the persisted index for `(scope_ids, when)` if it exists and was
-    /// built against `version` (the current `data_version`).
+    /// built against `version` (the current `index_version`).
     fn open_cached(
         &self,
         dir: &std::path::Path,
@@ -744,13 +750,6 @@ fn hex16(h: &[u8; 32]) -> String {
     h[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `PRAGMA data_version`: changes when another connection commits to the same
-/// database file; unchanged for writes on this connection. Only meaningful
-/// compared between two reads on the same connection, which is all we do.
-fn data_version(conn: &Connection) -> Result<i64> {
-    Ok(conn.query_row("PRAGMA data_version", [], |r| r.get(0))?)
-}
-
 /// Fetch vectors for a specific set of ids. Used by MMR, which needs random
 /// access to a few dozen candidates rather than a full scan.
 pub fn load_vecs(
@@ -785,6 +784,11 @@ pub fn put_vec(conn: &Connection, kind: i64, ref_id: i64, q: &[i8]) -> Result<()
          ON CONFLICT(kind, ref_id) DO UPDATE SET q = excluded.q",
         rusqlite::params![kind, ref_id, to_blob(q)],
     )?;
+    // A fact vector is exactly what the persisted index serves; episode vectors
+    // are only read live, so they must not bump the cache version.
+    if kind == db::VEC_FACT {
+        db::bump_index_version(conn)?;
+    }
     Ok(())
 }
 
@@ -1149,13 +1153,12 @@ mod tests {
         let idx = cache.index(&first, &[sc.id], When::Live).unwrap();
         assert_eq!(idx.ids, vec![a]);
         let first_ver = cache.version;
-        assert_ne!(first_ver, 0, "data_version must be non-zero on a real file");
+        assert_ne!(first_ver, 0, "index_version must be non-zero after a fact");
 
-        // Another connection writing is the only thing data_version sees.
+        // Another connection writing a fact vector bumps index_version, so the
+        // next read must reload.
         let mut other = db::open(&path).unwrap();
         let b = mk(&mut other, "pnpm");
-
-        // The value of data_version changed, so the next read must reload.
         let idx2 = cache.index(&first, &[sc.id], When::Live).unwrap();
         assert!(
             idx2.ids.contains(&b),
@@ -1169,20 +1172,22 @@ mod tests {
         assert!(idx3.ids.contains(&b));
         assert_eq!(cache.version, ver_after, "no rewrite when nothing changed");
 
-        // Our own connection writing does NOT touch data_version, so the cache
-        // stays as it was — the server invalidates explicitly in that case.
-        let c = mk(&mut first, "yarn");
-        {
-            let idx4 = cache.index(&first, &[sc.id], When::Live).unwrap();
-            assert!(
-                !idx4.ids.contains(&c),
-                "explicit invalidate() is the contract"
-            );
-        }
-        assert_eq!(
-            cache.version, ver_after,
-            "own writes don't move data_version"
+        // A hits-only write (what mark_hits does) must NOT invalidate the
+        // cache: it changes no vector the index serves, and doing so used to
+        // rebuild the persisted mmap file on every autosave prompt.
+        let hit_ver_before = cache.version;
+        store::mark_hits(&first, &[a]).unwrap();
+        let idx_h = cache.index(&first, &[sc.id], When::Live).unwrap();
+        assert!(
+            !idx_h.ids.is_empty() && cache.version == hit_ver_before,
+            "mark_hits must not invalidate the index cache"
         );
+
+        // Our own connection writing a fact vector DOES bump index_version now
+        // (the server calls invalidate() too, but the version alone reloads).
+        let c = mk(&mut first, "yarn");
+        let idx4 = cache.index(&first, &[sc.id], When::Live).unwrap();
+        assert!(idx4.ids.contains(&c), "own write must reload the cache");
 
         cache.invalidate();
         let idx5 = cache.index(&first, &[sc.id], When::Live).unwrap();

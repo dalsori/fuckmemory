@@ -11,7 +11,7 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 
 use crate::config::{now, Config, DAY};
-use crate::db::VEC_FACT;
+use crate::db::{self, VEC_FACT};
 use crate::embed::{cosine_q, Embedder, VecIndex};
 use crate::graph::When;
 
@@ -129,6 +129,7 @@ fn merge_duplicates_in_scope(conn: &mut Connection, scope_id: i64) -> Result<usi
                  WHERE id = ?1 AND invalidated_at IS NULL",
                 params![drop_, ts, keep],
             )?;
+            db::bump_index_version(&tx)?;
             dead.insert(drop_);
             merged += 1;
             if drop_ == a {
@@ -162,6 +163,7 @@ pub fn prune(conn: &Connection, days: i64, dry_run: bool) -> Result<usize> {
             "DELETE FROM vecs WHERE kind = ?1 AND ref_id = ?2",
             params![VEC_FACT, id],
         )?;
+        crate::db::bump_index_version(conn)?;
     }
     Ok(ids.len())
 }

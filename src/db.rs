@@ -361,6 +361,26 @@ pub fn meta_set(conn: &Connection, k: &str, v: &str) -> Result<()> {
     Ok(())
 }
 
+/// Monotonic version of the *vector index content*. Bumped only when the facts
+/// behind the index change (a fact vector is written, a fact is invalidated or
+/// deleted). Deliberately NOT moved by `mark_hits` or by episode-only writes:
+/// those touch no vector the persisted index serves, and `PRAGMA data_version`
+/// would have invalidated the mmap cache on every autosave prompt (~90 ms
+/// rebuild). See `VecCache::index` in embed.rs.
+pub fn index_version(conn: &Connection) -> Result<i64> {
+    Ok(meta_get(conn, "index_version")?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0))
+}
+
+/// Increment the vector-index version. Must be called inside the same
+/// transaction as the content change so a reader never sees a stale cache
+/// paired with a new version (or vice versa).
+pub fn bump_index_version(conn: &Connection) -> Result<()> {
+    let v = index_version(conn)? + 1;
+    meta_set(conn, "index_version", &v.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

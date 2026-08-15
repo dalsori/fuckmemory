@@ -464,6 +464,7 @@ impl App {
             rusqlite::params![id, crate::config::now()],
         )?;
         if n > 0 {
+            crate::db::bump_index_version(&self.conn)?;
             self.flash(format!("retracted #{id} — still visible in `timeline`"));
             self.stats = store::stats(&self.conn)?;
             self.reload_memories()?;

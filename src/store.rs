@@ -535,6 +535,9 @@ pub fn insert_fact(
             params![old, ts, id, f.valid_from.unwrap_or(ts)],
         )?;
     }
+    if !superseded.is_empty() {
+        db::bump_index_version(conn)?;
+    }
 
     for e in [src_id, dst_id].into_iter().flatten() {
         conn.execute("UPDATE entities SET degree = degree + 1 WHERE id = ?1", [e])?;
@@ -675,6 +678,9 @@ pub fn invalidate(conn: &Connection, scope: &Scope, fact_id: i64) -> Result<bool
          WHERE id = ?1 AND scope_id = ?2 AND invalidated_at IS NULL",
         params![fact_id, scope.id, now()],
     )?;
+    if n > 0 {
+        db::bump_index_version(conn)?;
+    }
     Ok(n > 0)
 }
 
@@ -689,6 +695,9 @@ pub fn purge(conn: &Connection, scope: &Scope, fact_id: i64) -> Result<bool> {
         "DELETE FROM vecs WHERE kind = ?1 AND ref_id = ?2",
         params![VEC_FACT, fact_id],
     )?;
+    if tx_n > 0 {
+        db::bump_index_version(conn)?;
+    }
     Ok(tx_n > 0)
 }
 

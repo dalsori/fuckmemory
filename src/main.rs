@@ -11,7 +11,7 @@ use fuckmemory::install::{self, What};
 use fuckmemory::pack::{self, PackOptions};
 use fuckmemory::retrieve::{self, Query};
 use fuckmemory::store::{self, FactInput, RememberInput};
-use fuckmemory::{consolidate, db, graph, mcp, scope, update};
+use fuckmemory::{consolidate, db, graph, mcp, scope, task, update};
 
 #[derive(Parser)]
 #[command(
@@ -231,6 +231,47 @@ enum Cmd {
         #[arg(long)]
         scope: Option<String>,
     },
+    /// Track the in-progress task so any agent can resume it after an
+    /// interruption (token budget, crash, hand-off)
+    Task {
+        #[command(subcommand)]
+        cmd: TaskCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum TaskCmd {
+    /// Save (or replace) the in-progress task state. This is the checkpoint an
+    /// interrupted agent leaves for whoever picks the work up next.
+    Save {
+        /// The state of the work: what's done, what's in flight, what's next.
+        text: Vec<String>,
+        /// Files this task is touching, so a resuming agent knows the blast radius.
+        #[arg(long, value_delimiter = ',')]
+        file: Vec<String>,
+        /// The original request/goal, kept separate from the current state.
+        #[arg(long)]
+        goal: Option<String>,
+    },
+    /// Print the current task checkpoint so a (possibly different) agent can
+    /// pick up exactly where the previous one stopped.
+    Status,
+    /// Close the current task. The checkpoint stays readable via --as-of and
+    /// the last save is kept as a searchable episode.
+    Done {
+        /// Optional final note, e.g. what was shipped or what blocked it.
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Save the task state AND store it as a durable memory, so `recall` can
+    /// find it even before a fresh session asks for `task status`.
+    Remember {
+        text: Vec<String>,
+        #[arg(long)]
+        file: Vec<String>,
+        #[arg(long)]
+        goal: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -417,6 +458,7 @@ fn run() -> Result<()> {
             Ok(())
         }
         Cmd::Import { file, scope: s } => cmd_import(&cfg, file, s),
+        Cmd::Task { cmd } => cmd_task(&cfg, cmd),
     }
 }
 
@@ -1552,4 +1594,66 @@ fn cmd_import(cfg: &Config, file: PathBuf, scope_spec: Option<String>) -> Result
         report.episodes, report.facts, report.files, sc.label
     );
     Ok(())
+}
+
+fn cmd_task(cfg: &Config, cmd: TaskCmd) -> Result<()> {
+    match cmd {
+        TaskCmd::Save { text, file, goal } => {
+            let state = text.join(" ");
+            if state.trim().is_empty() {
+                anyhow::bail!("task save needs some text describing the work in progress");
+            }
+            let mut conn = db::open(&cfg.db_path())?;
+            let sc = scope::resolve(&conn, None, &cwd())?;
+            let emb = cached_embedder(cfg);
+            let cp = task::save(&mut conn, &state, &file, goal.as_deref())?;
+            let eid = task::remember_as_episode(&mut conn, &sc, emb.as_ref(), &cp, false)?;
+            println!(
+                "task checkpoint saved (episode #{eid}) — a future `task status` or `recall` will find it"
+            );
+            Ok(())
+        }
+        TaskCmd::Status => {
+            let conn = db::open(&cfg.db_path())?;
+            match task::current(&conn)? {
+                Some(cp) => {
+                    println!("{}", task::render(&cp));
+                    Ok(())
+                }
+                None => {
+                    println!("no task in progress — start one with `fuckmemory task save \"...\"`");
+                    Ok(())
+                }
+            }
+        }
+        TaskCmd::Done { note } => {
+            let mut conn = db::open(&cfg.db_path())?;
+            let sc = scope::resolve(&conn, None, &cwd())?;
+            let emb = cached_embedder(cfg);
+            match task::done(&mut conn, note.as_deref())? {
+                Some(cp) => {
+                    let eid = task::remember_as_episode(&mut conn, &sc, emb.as_ref(), &cp, true)?;
+                    println!("task closed (episode #{eid}). Next `task save` starts a fresh task.");
+                    Ok(())
+                }
+                None => {
+                    println!("no task in progress — nothing to close");
+                    Ok(())
+                }
+            }
+        }
+        TaskCmd::Remember { text, file, goal } => {
+            let state = text.join(" ");
+            if state.trim().is_empty() {
+                anyhow::bail!("task remember needs some text");
+            }
+            let mut conn = db::open(&cfg.db_path())?;
+            let sc = scope::resolve(&conn, None, &cwd())?;
+            let emb = cached_embedder(cfg);
+            let cp = task::save(&mut conn, &state, &file, goal.as_deref())?;
+            let eid = task::remember_as_episode(&mut conn, &sc, emb.as_ref(), &cp, false)?;
+            println!("saved as a memory (episode #{eid}) and set as the active task checkpoint");
+            Ok(())
+        }
+    }
 }

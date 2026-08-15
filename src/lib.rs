@@ -6,6 +6,7 @@
 //! - [`embed`]     static embeddings, int8-quantized, brute-force SIMD scan
 //! - [`fast`]      an mmap'd model cache, so a cold invocation costs ~1 ms
 //! - [`store`]     the LLM-free write path
+//! - [`task`]      an in-progress work checkpoint any agent can resume
 //! - [`retrieve`]  BM25 + vector + graph expansion, fused with RRF, MMR-deduped
 //! - [`pack`]      token-budgeted rendering of what the agent will actually read
 //! - [`mcp`]       stdio JSON-RPC server, the universal agent interface
@@ -27,6 +28,7 @@ pub mod pack;
 pub mod retrieve;
 pub mod scope;
 pub mod store;
+pub mod task;
 pub mod tui;
 pub mod update;
 

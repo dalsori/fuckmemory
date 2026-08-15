@@ -786,3 +786,36 @@ fn a_cold_recall_is_fast_when_the_cache_is_warm() {
         "cold load took {load:?} — is it falling back to the full model?"
     );
 }
+
+#[test]
+fn task_checkpoint_survives_across_sessions() {
+    let home = scratch("task");
+    let (out, err, ok) = run(
+        &home,
+        &[
+            "task",
+            "save",
+            "wired opencode plugin",
+            "--goal",
+            "add hooks",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("checkpoint saved"), "got {out}");
+
+    // A second session (fresh process) can pick the task up.
+    let (out, _, ok) = run(&home, &["task", "status"]);
+    assert!(ok);
+    assert!(out.contains("wired opencode plugin"), "got {out}");
+    assert!(out.contains("add hooks"), "got {out}");
+
+    // The checkpoint is also a searchable memory.
+    let (out, _, _) = run(&home, &["recall", "opencode", "--raw"]);
+    assert!(out.contains("in-progress task"), "got {out}");
+
+    // Closing keeps the history readable.
+    let (_out, err, ok) = run(&home, &["task", "done", "--note", "verified"]);
+    assert!(ok, "{err}");
+    let (out, _, _) = run(&home, &["task", "status"]);
+    assert!(out.contains("[closed] verified"), "got {out}");
+}

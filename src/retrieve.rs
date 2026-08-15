@@ -565,26 +565,12 @@ pub fn recall(
             }
         }
     }
+    // One query for every episode at once, not one per episode: with a 100-hit
+    // recall that was up to 100 round trips to SQLite over the same file_refs
+    // table.
     let mut files: std::collections::HashMap<i64, Vec<crate::store::FileRef>> =
-        std::collections::HashMap::new();
-    let by_episode: std::collections::HashMap<i64, Vec<crate::store::FileRef>> = episode_ids
-        .iter()
-        .map(|eid| {
-            (
-                *eid,
-                crate::store::files_for_episodes(conn, &[*eid]).unwrap_or_default(),
-            )
-        })
-        .collect();
-    for h in &hits {
-        if let Some(eid) = h.fact.episode_id {
-            if let Some(list) = by_episode.get(&eid) {
-                if !list.is_empty() {
-                    files.insert(eid, list.clone());
-                }
-            }
-        }
-    }
+        crate::store::files_by_episode(conn, &episode_ids).unwrap_or_default();
+    files.retain(|_, list| !list.is_empty());
 
     Ok(Recall {
         hits,

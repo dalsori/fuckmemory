@@ -611,6 +611,43 @@ pub fn files_for_episodes(conn: &Connection, episode_ids: &[i64]) -> Result<Vec<
     Ok(out)
 }
 
+/// Like [`files_for_episodes`], but grouped by episode id so a recall can attach
+/// each fact's files without issuing one query per episode. A single `IN (...)`.
+pub fn files_by_episode(
+    conn: &Connection,
+    episode_ids: &[i64],
+) -> Result<HashMap<i64, Vec<FileRef>>> {
+    let mut out: HashMap<i64, Vec<FileRef>> = HashMap::new();
+    if episode_ids.is_empty() {
+        return Ok(out);
+    }
+    let placeholders: Vec<String> = (0..episode_ids.len()).map(|_| "?".into()).collect();
+    let sql = format!(
+        "SELECT episode_id, path, lang, snippet, line_from, line_to
+         FROM file_refs WHERE episode_id IN ({})
+         ORDER BY episode_id, line_from",
+        placeholders.join(",")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(episode_ids), |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            FileRef {
+                path: r.get(1)?,
+                lang: r.get(2)?,
+                snippet: r.get(3)?,
+                line_from: r.get(4)?,
+                line_to: r.get(5)?,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (eid, fr) = row?;
+        out.entry(eid).or_default().push(fr);
+    }
+    Ok(out)
+}
+
 /// Build a fact from raw text when the agent gave us no structure.
 ///
 /// The statement is the text itself — never paraphrased, because paraphrasing

@@ -361,7 +361,10 @@ impl VecIndex {
         let mut dim = 0usize;
         while let Some(r) = rows.next()? {
             let id: i64 = r.get(0)?;
-            let blob: Vec<u8> = r.get(1)?;
+            // Borrow the blob instead of materializing a Vec<u8> per row: at
+            // 100k facts that is 100k short-lived allocations on the cold path
+            // (a persisted-index rebuild or a fresh one-shot recall).
+            let blob = r.get_ref(1)?.as_blob()?;
             if dim == 0 {
                 dim = blob.len();
             }
@@ -399,7 +402,7 @@ impl VecIndex {
         let mut dim = 0usize;
         while let Some(r) = rows.next()? {
             let id: i64 = r.get(0)?;
-            let blob: Vec<u8> = r.get(1)?;
+            let blob = r.get_ref(1)?.as_blob()?;
             if dim == 0 {
                 dim = blob.len();
             }
@@ -449,31 +452,126 @@ impl VecIndex {
     }
 
     /// Top-`k` by cosine. Returns `(id, score)` descending.
+    ///
+    /// Keeps a bounded `BinaryHeap` of size `k` instead of scoring and sorting
+    /// all `n` rows: memory stays O(k), and the sort is O(n log k) rather than
+    /// a partial sort of the whole candidate set. With rayon the chunks fold
+    /// their own heaps and reduce pairwise, so the full `Vec<(i64, f32)>` of
+    /// every row is never materialized.
     pub fn topk(&self, query: &[i8], k: usize) -> Vec<(i64, f32)> {
-        if self.ids.is_empty() || self.dim == 0 || query.len() != self.dim {
+        if self.ids.is_empty() || self.dim == 0 || query.len() != self.dim || k == 0 {
             return Vec::new();
         }
         let rows = self.data.rows();
-        let mut scored: Vec<(i64, f32)> = if self.ids.len() >= 4_096 {
+        let mut scored = if self.ids.len() >= 4_096 {
             use rayon::prelude::*;
+            let partial = |(i, row): (usize, &[i8])| (self.ids[i], cosine_q(query, row));
             rows.par_chunks(self.dim)
                 .enumerate()
-                .map(|(i, row)| (self.ids[i], cosine_q(query, row)))
-                .collect()
+                .map(partial)
+                .fold(
+                    || BoundedTopK::new(k),
+                    |mut acc, (id, s)| {
+                        acc.push(id, s);
+                        acc
+                    },
+                )
+                .reduce(
+                    || BoundedTopK::new(k),
+                    |mut a, mut b| {
+                        let mut out = BoundedTopK::new(k);
+                        for (id, s) in a.drain() {
+                            out.push(id, s);
+                        }
+                        for (id, s) in b.drain() {
+                            out.push(id, s);
+                        }
+                        out
+                    },
+                )
+                .into_vec()
         } else {
-            (0..self.ids.len())
-                .map(|i| (self.ids[i], cosine_q(query, self.row(i))))
-                .collect()
+            let mut acc = BoundedTopK::new(k);
+            for (i, row) in rows.chunks(self.dim).enumerate() {
+                acc.push(self.ids[i], cosine_q(query, row));
+            }
+            acc.into_vec()
         };
-        let n = scored.len();
-        let k = k.min(n);
-        // Partial sort: only the top k need to be ordered, which matters when the
-        // candidate set is large.
-        let pivot = k.saturating_sub(1).min(n - 1);
-        scored.select_nth_unstable_by(pivot, |a, b| b.1.total_cmp(&a.1));
-        scored.truncate(k);
         scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
         scored
+    }
+}
+
+/// A min-heap that keeps only the top-`k` scored ids, used by [`VecIndex::topk`]
+/// to bound memory to `k` entries instead of one per vector. `Scored` orders by
+/// score (ascending, via `total_cmp`), and the heap is wrapped in `Reverse` so
+/// the root is the *worst* candidate: an overflow evicts it.
+#[derive(Clone, Copy)]
+struct Scored {
+    id: i64,
+    score: f32,
+}
+
+impl PartialEq for Scored {
+    fn eq(&self, other: &Self) -> bool {
+        self.score.total_cmp(&other.score) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for Scored {}
+impl PartialOrd for Scored {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Scored {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score.total_cmp(&other.score)
+    }
+}
+
+struct BoundedTopK {
+    k: usize,
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<Scored>>,
+}
+
+impl BoundedTopK {
+    fn new(k: usize) -> Self {
+        Self {
+            k,
+            heap: std::collections::BinaryHeap::new(),
+        }
+    }
+
+    /// Insert one scored id. The heap holds at most `k`; the worst element is
+    /// dropped when it overflows, so the survivor set is the top-`k` seen so far.
+    fn push(&mut self, id: i64, score: f32) {
+        use std::cmp::Reverse;
+        let cand = Scored { id, score };
+        if self.heap.len() < self.k {
+            self.heap.push(Reverse(cand));
+        } else if let Some(Reverse(worst)) = self.heap.peek().copied() {
+            if score > worst.score {
+                self.heap.pop();
+                self.heap.push(Reverse(cand));
+            }
+        }
+    }
+
+    /// Drain the survivors as `(id, score)` in arbitrary order.
+    fn drain(&mut self) -> Vec<(i64, f32)> {
+        use std::cmp::Reverse;
+        self.heap
+            .drain()
+            .map(|Reverse(s)| (s.id, s.score))
+            .collect()
+    }
+
+    fn into_vec(self) -> Vec<(i64, f32)> {
+        use std::cmp::Reverse;
+        self.heap
+            .into_iter()
+            .map(|Reverse(s)| (s.id, s.score))
+            .collect()
     }
 }
 
@@ -1098,6 +1196,23 @@ mod tests {
     fn topk_on_empty_index_is_empty() {
         let idx = VecIndex::from_parts(0, vec![], vec![]);
         assert!(idx.topk(&[1, 2, 3], 5).is_empty());
+    }
+
+    /// The bounded heap must keep exactly the top-`k` ids by score, dropping the
+    /// worst when it overflows, and stay exact no matter the insertion order.
+    #[test]
+    fn bounded_topk_keeps_only_the_highest_scores() {
+        let mut h = BoundedTopK::new(3);
+        for (id, score) in [(1, 0.2), (2, 0.9), (3, 0.5), (4, 0.8), (5, 0.1)] {
+            h.push(id, score);
+        }
+        let mut out = h.into_vec();
+        out.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+        assert_eq!(
+            out,
+            vec![(2, 0.9), (4, 0.8), (3, 0.5)],
+            "only the top 3 survive"
+        );
     }
 
     /// The cache serves the same index while nothing else writes, and reloads

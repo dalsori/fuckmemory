@@ -383,8 +383,8 @@ fn mmr(
         .collect();
     let mut picked: Vec<Hit> = Vec::with_capacity(limit);
 
-    // Returns the similarity *and* the near-duplicate threshold for whichever
-    // metric was used, since the two are not on the same scale.
+    // Similarity between two facts, plus the near-duplicate threshold for the
+    // metric used, since cosine and Jaccard are not on the same scale.
     let sim = |a: &FactRow, b: &FactRow| -> (f32, f32) {
         match (vecs.get(&a.id), vecs.get(&b.id)) {
             (Some(x), Some(y)) => (cosine_q(x, y), NEAR_DUP_COSINE),
@@ -392,19 +392,22 @@ fn mmr(
         }
     };
 
+    // Each candidate's max similarity to whatever has been picked so far, plus
+    // whether it is a near-duplicate of a pick. After every pick we fold the new
+    // pick into each remaining candidate's running max once, so a pair is
+    // measured exactly once instead of re-measured against every picked fact on
+    // every round (which made MMR O(pool x picked^2)).
+    let mut sim_to_picked: Vec<f32> = vec![0.0; pool.len()];
+    let mut is_dup: Vec<bool> = vec![false; pool.len()];
+
     while picked.len() < limit && !pool.is_empty() {
         let mut best = 0usize;
         let mut best_val = f32::MIN;
-        for (i, (fact, score, _)) in pool.iter().enumerate() {
-            let (max_sim, is_dup) = picked.iter().fold((0.0f32, false), |(m, dup), h| {
-                let (s, threshold) = sim(fact, &h.fact);
-                (m.max(s), dup || s >= threshold)
-            });
-            // A true near-duplicate is dropped outright rather than ranked low.
-            if is_dup {
+        for (i, (_, score, _)) in pool.iter().enumerate() {
+            if is_dup[i] {
                 continue;
             }
-            let val = MMR_LAMBDA * score - (1.0 - MMR_LAMBDA) * max_sim;
+            let val = MMR_LAMBDA * score - (1.0 - MMR_LAMBDA) * sim_to_picked[i];
             if val > best_val {
                 best_val = val;
                 best = i;
@@ -415,6 +418,21 @@ fn mmr(
         }
         let (fact, score, via) = pool.swap_remove(best);
         picked.push(Hit { fact, score, via });
+        let new_pick = picked.last().expect("just pushed");
+
+        // swap_remove moved the former last element into `best`; carry its
+        // running values along, then fold the new pick into every survivor.
+        if best < pool.len() {
+            sim_to_picked[best] = sim_to_picked[pool.len()];
+            is_dup[best] = is_dup[pool.len()];
+        }
+        sim_to_picked.truncate(pool.len());
+        is_dup.truncate(pool.len());
+        for (i, (f, _, _)) in pool.iter().enumerate() {
+            let (s, th) = sim(f, &new_pick.fact);
+            sim_to_picked[i] = sim_to_picked[i].max(s);
+            is_dup[i] = is_dup[i] || s >= th;
+        }
     }
     picked
 }

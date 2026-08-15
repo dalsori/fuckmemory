@@ -20,9 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Windows path redaction.** Ignore globs now match Windows backslash paths
   (`C:\proj\.env` catches `**/.env`), and `~` expansion accepts `~\` as well as
   `~/`.
-- **Per-OS usage guides.** A detailed walkthrough (install, autosave, task
-  resumption, config, troubleshooting) now lives in `docs/en/usage.md` and
-  `docs/es/usage.md`; the README keeps the one-glance summary.
+- **Per-OS usage guides.** The docs are now organized one guide per feature
+  (`docs/en/` and `docs/es/`: install, agents, autosave, commands, task, config,
+  maintenance, troubleshooting), so a new user knows exactly what to read; the
+  README keeps the one-glance summary.
 - **Recall shows provenance.** Every memory line now answers "who wrote this,
   and from what state of the repo?" — the writing agent (`[by claude-code]`),
   the short git HEAD at the moment it was learned (`[@ ba85d94]`, captured on

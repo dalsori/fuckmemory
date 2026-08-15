@@ -174,6 +174,10 @@ pub fn reindex(conn: &mut Connection, emb: &Embedder, model: &str) -> Result<usi
         .prepare("SELECT id, statement FROM facts")?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let episodes: Vec<(i64, String)> = conn
+        .prepare("SELECT id, body FROM episodes")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
     // IMMEDIATE so concurrent writers queue on the write lock instead of failing
     // with SQLITE_BUSY when a deferred transaction tries to upgrade. See store.rs.
@@ -186,6 +190,17 @@ pub fn reindex(conn: &mut Connection, emb: &Embedder, model: &str) -> Result<usi
     {
         for ((id, _), v) in chunk_rows.iter().zip(chunk_vecs.iter()) {
             crate::embed::put_vec(&tx, VEC_FACT, *id, &crate::embed::quantize(v))?;
+        }
+    }
+    // Episodes carry vectors too (semantic `--raw` search); re-embedding only the
+    // facts would leave episode vectors from an old model behind.
+    let ep_texts: Vec<String> = episodes.iter().map(|(_, s)| s.clone()).collect();
+    for (chunk_rows, chunk_vecs) in episodes
+        .chunks(512)
+        .zip(ep_texts.chunks(512).map(|c| emb.embed_batch(c)))
+    {
+        for ((id, _), v) in chunk_rows.iter().zip(chunk_vecs.iter()) {
+            crate::embed::put_vec(&tx, crate::db::VEC_EPISODE, *id, &crate::embed::quantize(v))?;
         }
     }
     let n = rows.len();

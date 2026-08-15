@@ -232,6 +232,62 @@ fn bm25_episodes(
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// Semantic episode search: the episode vectors are written on every autosave
+/// but no retriever read them, so raw notes were only ever found by exact
+/// keyword. Fuse a vector scan with the BM25 matches so `--raw` also surfaces
+/// paraphrases of a past observation.
+fn vec_episodes(
+    conn: &Connection,
+    scope_ids: &[i64],
+    emb: &Embedder,
+    text: &str,
+    limit: usize,
+) -> Result<Vec<EpisodeHit>> {
+    let idx = VecIndex::load_episodes(conn, scope_ids)?;
+    if idx.is_empty() || idx.dim != emb.dim {
+        return Ok(Vec::new());
+    }
+    let scored = idx.topk(&emb.embed_q(text), limit);
+    let ids: Vec<i64> = scored.into_iter().map(|(id, _)| id).collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ph = graph::placeholders(ids.len());
+    let mut st = conn.prepare_cached(&format!(
+        "SELECT id, kind, source, body, recorded_at FROM episodes
+         WHERE id IN ({ph})"
+    ))?;
+    let rows = st.query_map(rusqlite::params_from_iter(&ids), |r| {
+        Ok(EpisodeHit {
+            id: r.get(0)?,
+            kind: r.get(1)?,
+            source: r.get(2)?,
+            text: r.get(3)?,
+            recorded_at: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Fuse two episode lists by RRF over their ids, keeping `limit` entries.
+fn fuse_episodes(a: Vec<EpisodeHit>, b: Vec<EpisodeHit>, limit: usize) -> Vec<EpisodeHit> {
+    let mut ranked: HashMap<i64, (f32, EpisodeHit)> = HashMap::new();
+    for (i, list) in [&a, &b].into_iter().enumerate() {
+        let w = if i == 0 { 1.0 } else { 0.7 };
+        for (rank, e) in list.iter().enumerate() {
+            let score = w / (60.0 + rank as f32);
+            ranked
+                .entry(e.id)
+                .and_modify(|(s, _)| *s += score)
+                .or_insert((score, e.clone()));
+        }
+    }
+    let mut out: Vec<EpisodeHit> = ranked.into_values().map(|(_, e)| e).collect();
+    out.sort_unstable_by_key(|e| std::cmp::Reverse(e.recorded_at));
+    out.truncate(limit);
+    out
+}
+
 /// Every live fact scored against the query by the vector leg alone, best first.
 /// Powers `fuckmemory explain`, and is how the relevance floor below was calibrated.
 pub fn explain_vectors(
@@ -482,9 +538,21 @@ pub fn recall(
     };
     let hits = mmr(scored, &vecs, q.limit);
 
-    let episodes = match (&match_expr, q.include_episodes) {
-        (Some(m), true) => bm25_episodes(conn, scope_ids, m, q.limit)?,
-        _ => Vec::new(),
+    let episodes = match q.include_episodes {
+        true => {
+            let mut bm = match &match_expr {
+                Some(m) => bm25_episodes(conn, scope_ids, m, q.limit)?,
+                None => Vec::new(),
+            };
+            if semantic {
+                if let Some(e) = emb {
+                    let vec = vec_episodes(conn, scope_ids, e, &q.text, q.limit)?;
+                    bm = fuse_episodes(bm, vec, q.limit);
+                }
+            }
+            bm
+        }
+        false => Vec::new(),
     };
 
     // Files behind the returned facts: collect the distinct episodes they came
@@ -868,5 +936,22 @@ mod tests {
         )
         .unwrap();
         assert!(r.hits.len() <= 2);
+    }
+
+    #[test]
+    fn fuse_episodes_merges_bm25_and_vector_hits_without_duplicates() {
+        let mk = |id: i64, t: i64| EpisodeHit {
+            id,
+            kind: "note".into(),
+            source: "test".into(),
+            text: format!("observation {id}"),
+            recorded_at: t,
+        };
+        let bm25 = vec![mk(1, 100), mk(2, 200), mk(3, 300)];
+        let vector = vec![mk(3, 300), mk(4, 400)];
+        let out = fuse_episodes(bm25, vector, 10);
+        let ids: Vec<i64> = out.iter().map(|e| e.id).collect();
+        assert_eq!(ids.len(), 4, "shared id 3 must not be duplicated");
+        assert_eq!(ids, vec![4, 3, 2, 1], "newest first");
     }
 }

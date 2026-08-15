@@ -376,6 +376,42 @@ impl VecIndex {
         Ok(Self::from_parts(dim, ids, data))
     }
 
+    /// Load the episode vectors for the given scopes. Episodes are immutable
+    /// observations, so there is no temporal filter — every episode's vector is
+    /// live. Powers semantic search over raw notes (`recall --raw`).
+    pub fn load_episodes(conn: &Connection, scope_ids: &[i64]) -> Result<Self> {
+        let placeholders = vec!["?"; scope_ids.len()].join(",");
+        let sql = format!(
+            "SELECT v.ref_id, v.q FROM vecs v
+             JOIN episodes e ON e.id = v.ref_id
+             WHERE v.kind = {kind} AND e.scope_id IN ({placeholders})",
+            kind = db::VEC_EPISODE,
+        );
+        let mut st = conn.prepare_cached(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> = scope_ids
+            .iter()
+            .map(|s| s as &dyn rusqlite::ToSql)
+            .collect();
+        let mut rows = st.query(params.as_slice())?;
+
+        let mut ids = Vec::new();
+        let mut data: Vec<i8> = Vec::new();
+        let mut dim = 0usize;
+        while let Some(r) = rows.next()? {
+            let id: i64 = r.get(0)?;
+            let blob: Vec<u8> = r.get(1)?;
+            if dim == 0 {
+                dim = blob.len();
+            }
+            if blob.len() != dim {
+                continue;
+            }
+            ids.push(id);
+            data.extend(blob.iter().map(|&x| x as i8));
+        }
+        Ok(Self::from_parts(dim, ids, data))
+    }
+
     /// Wrap a validated [`VecIndexFile`] mapping as an index. Returns `None`
     /// when the mapping does not match the file header's expectations — the
     /// caller then falls back to `load_facts`.
@@ -1007,6 +1043,51 @@ mod tests {
 
         let any = VecIndex::load_facts(&conn, &[sc.id], When::Any).unwrap();
         assert_eq!(any.ids.len(), 2);
+    }
+
+    /// Episode vectors are written on autosave but must be loadable back for the
+    /// semantic `--raw` search; previously nothing read them and `reindex`
+    /// silently left them from an old model.
+    #[test]
+    fn load_episodes_reads_the_written_episode_vectors() {
+        use crate::store::{self, RememberInput};
+        use std::path::Path;
+
+        let mut conn = db::open_memory().unwrap();
+        let sc = scope::resolve(&conn, Some("/tmp/fm-embed-ep"), Path::new("/")).unwrap();
+        let out = store::remember(
+            &mut conn,
+            &sc,
+            None,
+            &RememberInput {
+                text: "the deploy pipeline runs on node 22".into(),
+                kind: "note".into(),
+                source: "test".into(),
+                facts: vec![],
+                files: vec![],
+                meta: None,
+                derive: false,
+            },
+        )
+        .unwrap();
+
+        // No model in tests, so the episode vector was skipped — add it by hand
+        // to prove the read path finds it.
+        put_vec(
+            &conn,
+            db::VEC_EPISODE,
+            out.episode_id,
+            &quantize(&[1.0, 0.0, 0.0, 0.0]),
+        )
+        .unwrap();
+
+        let idx = VecIndex::load_episodes(&conn, &[sc.id]).unwrap();
+        assert_eq!(
+            idx.ids,
+            vec![out.episode_id],
+            "episode vector must be readable"
+        );
+        assert_eq!(idx.dim, 4);
     }
 
     #[test]

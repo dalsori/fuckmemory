@@ -131,11 +131,14 @@ pub fn prompt_from_agent(raw: &str, agent: &str) -> (Option<String>, Value) {
     (prompt, meta)
 }
 
-/// Expand a leading `~` to the home directory, like the shell would.
+/// Expand a leading `~` to the home directory, like the shell would. Accepts
+/// both `~/` (Unix) and `~\` (Windows) as the separator after the tilde.
 fn expand_tilde(p: &str) -> std::path::PathBuf {
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
+    for sep in ["~/", "~\\"] {
+        if let Some(rest) = p.strip_prefix(sep) {
+            if let Some(home) = dirs::home_dir() {
+                return home.join(rest);
+            }
         }
     }
     std::path::PathBuf::from(p)
@@ -652,10 +655,16 @@ pub fn redact(text: &str) -> (String, usize) {
 /// start expands to the home directory. Everything else is a literal prefix
 /// match. Deliberately small: a full `glob` crate would drag a big dependency
 /// into a binary that has to start in milliseconds.
+///
+/// Paths are compared with `/` separators regardless of platform: Windows paths
+/// arrive as `C:\proj\.env` and are normalized here, so a glob written as
+/// `*.pem` or `~/.aws/*` matches on both Windows and Unix.
 fn path_glob_match(glob: &str, path: &str, home: &Path) -> bool {
+    let path = path.replace('\\', "/");
     let g = if let Some(rest) = glob.strip_prefix("~/") {
         if let Some(h) = home.to_str() {
-            if let Some(p) = path.strip_prefix(h) {
+            let h = h.replace('\\', "/");
+            if let Some(p) = path.strip_prefix(&h) {
                 return path_glob_match(&format!("**/{rest}"), p.trim_start_matches('/'), home);
             }
             return false;
@@ -668,8 +677,8 @@ fn path_glob_match(glob: &str, path: &str, home: &Path) -> bool {
     // path and any trailing segment (so `.env` matches `project/.env`).
     let anchored = g.starts_with('/');
     let g = g.trim_start_matches('/');
-    let target = if anchored {
-        path
+    let target: &str = if anchored {
+        &path
     } else {
         path.trim_start_matches('/')
     };
@@ -1105,6 +1114,27 @@ mod tests {
         );
         assert!(out.contains("[redacted]"), "got {out}");
         assert!(!out.contains("credentials"), "got {out}");
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn redact_paths_matches_windows_backslash_paths() {
+        // Windows paths use backslashes; the globs are written with forward
+        // slashes, so the matcher must normalize before comparing.
+        let home = std::path::Path::new("C:\\Users\\test");
+        let globs = vec!["**/.env".to_string(), "~/.aws/*".to_string()];
+        let (out, n) = redact_paths(
+            "deploy uses C:\\Users\\test\\.aws\\credentials as its secret source",
+            &globs,
+            home,
+        );
+        assert!(out.contains("[redacted]"), "got {out}");
+        assert!(!out.contains("credentials"), "got {out}");
+        assert_eq!(n, 1);
+
+        // A bare trailing segment also matches with backslashes.
+        let (out, n) = redact_paths("edit src\\config\\.env now", &globs, home);
+        assert!(out.contains("[redacted]"), "got {out}");
         assert_eq!(n, 1);
     }
 

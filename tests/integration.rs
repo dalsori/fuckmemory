@@ -266,9 +266,47 @@ fn export_then_import_into_a_fresh_store_preserves_facts() {
     let b = scratch("imp");
     let (out, err, ok) = run(&b, &["import", path.to_str().unwrap()]);
     assert!(ok, "import failed: {err}");
-    assert!(out.contains("imported 1 fact"), "got {out}");
+    assert!(
+        out.contains("imported 1 episode(s), 1 fact(s)"),
+        "got {out}"
+    );
     let (out, _, _) = run(&b, &["recall", "pgbouncer"]);
     assert!(out.contains("pgbouncer"), "got {out}");
+    // The raw observation survives the round trip too, not just the fact.
+    let (out, _, _) = run(&b, &["recall", "--raw", "postgres"]);
+    assert!(out.contains("postgres"), "got {out}");
+}
+
+#[test]
+fn export_then_import_preserves_episode_file_references() {
+    let a = scratch("expf");
+    let src = a.join("proj/src/notes.md");
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    std::fs::write(&src, "# notes\n\ncli builds run on node 22\n").unwrap();
+    run(
+        &a,
+        &[
+            "remember",
+            "the build scripts run on node 22",
+            "--file",
+            "src/notes.md:1-3",
+        ],
+    );
+    let (dump, _, ok) = run(&a, &["export"]);
+    assert!(ok);
+    let path = a.join("dump2.json");
+    std::fs::write(&path, &dump).unwrap();
+
+    let b = scratch("impf");
+    let (out, err, ok) = run(&b, &["import", path.to_str().unwrap()]);
+    assert!(ok, "import failed: {err}");
+    assert!(
+        out.contains("imported 1 episode(s), 1 fact(s), 1 file reference(s)"),
+        "got {out}"
+    );
+    // The recall shows the file the memory was learned against.
+    let (out, _, _) = run(&b, &["recall", "node 22"]);
+    assert!(out.contains("notes.md"), "got {out}");
 }
 
 #[test]

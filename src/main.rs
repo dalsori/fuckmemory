@@ -1538,45 +1538,18 @@ fn cmd_import(cfg: &Config, file: PathBuf, scope_spec: Option<String>) -> Result
     let text =
         std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
     let doc: serde_json::Value = serde_json::from_str(&text)?;
-    let facts = doc
-        .get("facts")
-        .and_then(|f| f.as_array())
-        .ok_or_else(|| anyhow::anyhow!("no `facts` array — is this a fuckmemory export?"))?;
+    if !doc.get("facts").and_then(|f| f.as_array()).is_some() {
+        anyhow::bail!("no `facts` array — is this a fuckmemory export?");
+    }
 
-    let conn = db::open(&cfg.db_path())?;
+    let mut conn = db::open(&cfg.db_path())?;
     let sc = scope::resolve(&conn, scope_spec.as_deref(), &cwd())?;
     let emb = cached_embedder(cfg);
 
-    let ts = now();
-    let mut added = 0usize;
-    for f in facts {
-        // Retracted facts are skipped on import: bringing them back live would
-        // resurrect beliefs the source had already abandoned.
-        if !f.get("invalidated_at").map(|v| v.is_null()).unwrap_or(true) {
-            continue;
-        }
-        let Some(statement) = f.get("statement").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let input = FactInput {
-            src: f.get("src").and_then(|v| v.as_str()).map(str::to_string),
-            rel: f
-                .get("rel")
-                .and_then(|v| v.as_str())
-                .unwrap_or("relates_to")
-                .to_string(),
-            dst: f.get("dst").and_then(|v| v.as_str()).map(str::to_string),
-            statement: statement.to_string(),
-            valid_from: f.get("valid_from").and_then(|v| v.as_i64()),
-            valid_to: None,
-            confidence: f.get("confidence").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
-            supersede: Some(false),
-        };
-        let (id, _) = store::insert_fact(&conn, &sc, emb.as_ref(), &input, None, ts)?;
-        if id.is_some() {
-            added += 1;
-        }
-    }
-    println!("imported {added} fact(s) into '{}'", sc.label);
+    let report = store::import_export(&mut conn, &sc, emb.as_ref(), &doc)?;
+    println!(
+        "imported {} episode(s), {} fact(s), {} file reference(s) into '{}'",
+        report.episodes, report.facts, report.files, sc.label
+    );
     Ok(())
 }

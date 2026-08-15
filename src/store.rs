@@ -758,23 +758,58 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
 /// Everything in a scope, for `export`.
 pub fn export_scope(conn: &Connection, scope: &Scope) -> Result<serde_json::Value> {
     let mut st = conn.prepare(
-        "SELECT id, source, kind, body, recorded_at FROM episodes WHERE scope_id = ?1 ORDER BY id",
+        "SELECT id, source, kind, body, meta, hash, head, recorded_at
+         FROM episodes WHERE scope_id = ?1 ORDER BY id",
     )?;
     let episodes: Vec<serde_json::Value> = st
         .query_map([scope.id], |r| {
+            let hash: Vec<u8> = r.get(5)?;
             Ok(serde_json::json!({
                 "id": r.get::<_, i64>(0)?,
                 "source": r.get::<_, String>(1)?,
                 "kind": r.get::<_, String>(2)?,
                 "text": r.get::<_, String>(3)?,
-                "recorded_at": r.get::<_, i64>(4)?,
+                "meta": r.get::<_, Option<String>>(4)?,
+                "hash": hex(hash),
+                "head": r.get::<_, Option<String>>(6)?,
+                "recorded_at": r.get::<_, i64>(7)?,
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
+    // File references, keyed by the episode id they hang off. The import side
+    // remaps episode ids, so the export keeps the original id alongside.
+    let mut st = conn.prepare(
+        "SELECT episode_id, path, lang, snippet, line_from, line_to
+         FROM file_refs WHERE episode_id IN (
+             SELECT id FROM episodes WHERE scope_id = ?1
+         ) ORDER BY episode_id, line_from",
+    )?;
+    let mut files: serde_json::Map<String, serde_json::Value> = Default::default();
+    for row in st.query_map([scope.id], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            serde_json::json!({
+                "path": r.get::<_, String>(1)?,
+                "lang": r.get::<_, Option<String>>(2)?,
+                "snippet": r.get::<_, String>(3)?,
+                "line_from": r.get::<_, Option<i64>>(4)?,
+                "line_to": r.get::<_, Option<i64>>(5)?,
+            }),
+        ))
+    })? {
+        let (eid, f) = row?;
+        files
+            .entry(eid.to_string())
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .unwrap()
+            .push(f);
+    }
+
     let mut st = conn.prepare(
         "SELECT f.id, se.name, f.rel, de.name, f.statement, f.confidence,
-                f.valid_from, f.valid_to, f.recorded_at, f.invalidated_at
+                f.valid_from, f.valid_to, f.recorded_at, f.invalidated_at, f.episode_id
          FROM facts f
          LEFT JOIN entities se ON se.id = f.src
          LEFT JOIN entities de ON de.id = f.dst
@@ -793,6 +828,7 @@ pub fn export_scope(conn: &Connection, scope: &Scope) -> Result<serde_json::Valu
                 "valid_to": r.get::<_, Option<i64>>(7)?,
                 "recorded_at": r.get::<_, i64>(8)?,
                 "invalidated_at": r.get::<_, Option<i64>>(9)?,
+                "episode_id": r.get::<_, Option<i64>>(10)?,
             }))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -801,8 +837,185 @@ pub fn export_scope(conn: &Connection, scope: &Scope) -> Result<serde_json::Valu
         "version": db::SCHEMA_VERSION,
         "scope": { "key": scope.key, "label": scope.label },
         "episodes": episodes,
+        "files": files,
         "facts": facts,
     }))
+}
+
+/// Lowercase hex of a byte slice, for the export envelope (hashes are stored
+/// as raw blobs in SQLite).
+fn hex(bytes: Vec<u8>) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Decode the hex from `export_scope` back into the raw hash blob.
+fn dehex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
+}
+
+/// Result of importing a scope exported with `export_scope`.
+#[derive(Debug, Default)]
+pub struct ImportReport {
+    pub episodes: usize,
+    pub facts: usize,
+    pub files: usize,
+}
+
+/// Import an export envelope into `scope`. Episodes are deduplicated by hash
+/// (so re-importing is idempotent), file references are reattached to the
+/// remapped episode ids, and live facts keep their `episode_id` lineage. The
+/// original recorded_at is preserved for both episodes and facts, so a restored
+/// store keeps its history; retracted facts are skipped, as `cmd_import` always
+/// did.
+pub fn import_export(
+    conn: &mut Connection,
+    scope: &Scope,
+    emb: Option<&Embedder>,
+    doc: &serde_json::Value,
+) -> Result<ImportReport> {
+    let mut report = ImportReport::default();
+
+    // old episode id -> new id. Episodes are immutable in the source store, so a
+    // matching (scope, hash) is the same observation and is reused.
+    let mut remap: std::collections::HashMap<i64, i64> = Default::default();
+
+    let episodes = doc.get("episodes").and_then(|v| v.as_array());
+    if let Some(episodes) = episodes {
+        for ep in episodes {
+            let Some(hash_hex) = ep.get("hash").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(hash) = dehex(hash_hex) else {
+                continue;
+            };
+            let Some(text) = ep.get("text").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let old_id = ep.get("id").and_then(|v| v.as_i64());
+            let recorded_at = ep.get("recorded_at").and_then(|v| v.as_i64());
+            let source = ep
+                .get("source")
+                .and_then(|v| v.as_str())
+                .unwrap_or("import");
+            let kind = ep.get("kind").and_then(|v| v.as_str()).unwrap_or("note");
+            let meta = ep.get("meta").and_then(|v| v.as_str());
+            let head = ep.get("head").and_then(|v| v.as_str());
+
+            let existing: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM episodes WHERE scope_id = ?1 AND hash = ?2",
+                    params![scope.id, hash],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let new_id = match existing {
+                Some(id) => id,
+                None => {
+                    let ts = recorded_at.unwrap_or_else(now);
+                    conn.execute(
+                        "INSERT INTO episodes(scope_id, source, kind, body, meta, hash, recorded_at, head)
+                         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![scope.id, source, kind, text, meta, hash, ts, head],
+                    )?;
+                    let id = conn.last_insert_rowid();
+                    if let Some(e) = emb {
+                        embed::put_vec(conn, VEC_EPISODE, id, &e.embed_q(text))?;
+                    }
+                    report.episodes += 1;
+                    id
+                }
+            };
+            if let Some(old) = old_id {
+                remap.insert(old, new_id);
+            }
+        }
+    }
+
+    // Files: the export keys them by original episode id.
+    if let Some(files) = doc.get("files").and_then(|v| v.as_object()) {
+        for (old_ep, list) in files {
+            let Ok(old_id) = old_ep.parse::<i64>() else {
+                continue;
+            };
+            let Some(new_id) = remap.get(&old_id).copied() else {
+                continue;
+            };
+            let Some(list) = list.as_array() else {
+                continue;
+            };
+            for f in list {
+                let Some(path) = f.get("path").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let ts = now();
+                conn.execute(
+                    "INSERT INTO file_refs(episode_id, path, lang, snippet, line_from, line_to, recorded_at)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        new_id,
+                        path,
+                        f.get("lang").and_then(|v| v.as_str()),
+                        f.get("snippet").and_then(|v| v.as_str()).unwrap_or(""),
+                        f.get("line_from").and_then(|v| v.as_i64()),
+                        f.get("line_to").and_then(|v| v.as_i64()),
+                        ts,
+                    ],
+                )?;
+                report.files += 1;
+            }
+        }
+    }
+
+    // Facts, live only, preserving the episode lineage and the recorded_at.
+    let facts = doc.get("facts").and_then(|v| v.as_array());
+    if let Some(facts) = facts {
+        for f in facts {
+            if !f.get("invalidated_at").map(|v| v.is_null()).unwrap_or(true) {
+                continue;
+            }
+            let Some(statement) = f.get("statement").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let episode_id = f
+                .get("episode_id")
+                .and_then(|v| v.as_i64())
+                .and_then(|old| remap.get(&old).copied());
+            let recorded_at = f.get("recorded_at").and_then(|v| v.as_i64());
+            let input = FactInput {
+                src: f.get("src").and_then(|v| v.as_str()).map(str::to_string),
+                rel: f
+                    .get("rel")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("relates_to")
+                    .to_string(),
+                dst: f.get("dst").and_then(|v| v.as_str()).map(str::to_string),
+                statement: statement.to_string(),
+                valid_from: f.get("valid_from").and_then(|v| v.as_i64()),
+                valid_to: f.get("valid_to").and_then(|v| v.as_i64()),
+                confidence: f.get("confidence").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32,
+                supersede: Some(false),
+            };
+            let (id, _) = insert_fact(
+                conn,
+                scope,
+                emb,
+                &input,
+                episode_id,
+                recorded_at.unwrap_or_else(now),
+            )?;
+            if id.is_some() {
+                report.facts += 1;
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 #[cfg(test)]

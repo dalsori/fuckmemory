@@ -129,26 +129,44 @@ build, AMD Ryzen 7 7445HS:
 | recall, persisted index | 10.7 ms | — |
 | recall, hot cache | 9.8 ms | — |
 
+## Design decisions
+
+These are deliberate trade-offs, not defects — the cost of the project's core
+choice: **no LLM runs in the write path**, which is what makes writes instant,
+offline and free.
+
+- **Static embeddings have no contextual understanding.** A query like "how do
+  I ship this to production" ranks the right memory second, not first. This is
+  the price of instant, offline writes: contextual embeddings would need a model
+  in the write path. BM25 and the graph carry most of the load for this reason.
+- **Consolidation does not use an LLM.** It merges near-identical facts by
+  similarity and closes contradictions that share a `src` + single-valued `rel`,
+  but won't notice a contradiction between two differently-worded facts. That is
+  the same trade-off: reasoning would cost a model call per consolidate.
+- **Salience is marker-based.** A rule phrased without any of the markers is kept
+  as an episode, not promoted to a fact. Honest by design — no model runs in the
+  write path, so the only defensible answers are "looks like a rule" and "don't
+  know", never a paraphrase.
+
 ## Honest limitations
 
-- **Static embeddings are the weak leg.** They have no contextual understanding —
-  a query like "how do I ship this to production" ranks the right memory second,
-  not first.
 - **A truly irrelevant query still returns one hit.** The vector relevance floor
   is relative to the best match, because measured cosines make an absolute
-  threshold impossible.
-- **Consolidation does not use an LLM**, so it merges near-identical facts but
-  will not notice that two differently-worded facts contradict each other unless
-  they share a `src` + single-valued `rel`.
+  threshold impossible: good matches land at 0.09–0.21 while an unrelated query
+  still peaks at 0.12, and the ranges overlap.
 - **Kimi Code** is detected but its MCP config format is unverified, so a snippet
   is printed rather than a guess written into a real config file.
 - **Not every agent's hook carries context back.** Autosave reaches Claude Code,
   Codex, Gemini CLI, Antigravity, Qwen, Cursor, Copilot CLI and OpenCode; recall
   injection works through the ones whose hook channel accepts context. Cursor
-  and Copilot CLI autosave every prompt but ignore injected context.
-- **Salience is marker-based.** A rule phrased without any of the markers is kept
-  as an episode, not promoted to a fact.
-- **Redaction is heuristic.** It is a safety net, not a guarantee.
+  and Copilot CLI autosave every prompt but ignore injected context — a property
+  of those agents, not a choice of ours.
+- **Redaction is a safety net, not a guarantee.** It is the deliberate cost of a
+  model-free write path: a credential that looks like an ordinary word ("the
+  password is `hunter2`") or uses an unknown prefix can still reach the disk.
+  It catches known formats, secret-ish keys, opaque blobs and any path matching
+  an `[ignore]` glob — but the only way to close the gap would be an LLM
+  reviewing every prompt, which would break the instant-write promise.
 
 ## Development
 

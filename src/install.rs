@@ -1894,6 +1894,9 @@ mod tests {
     #[test]
     fn opencode_hooks_are_a_plugin_file_removed_wholesale() {
         let home = tmpdir("hooks-opencode");
+        // Detection is by PATH *or* config dir; CI has no `opencode` binary, so
+        // create the dir the way the antigravity test does.
+        std::fs::create_dir_all(home.join(".config/opencode")).unwrap();
         let base = Options {
             command: "/usr/local/bin/fuckmemory".into(),
             global: true,

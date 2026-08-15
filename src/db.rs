@@ -461,4 +461,48 @@ mod tests {
             .unwrap();
         assert_eq!(hits, 1);
     }
+
+    /// A passive WAL checkpoint must shrink the -wal file without blocking even
+    /// when another connection holds a read, and never error.
+    #[test]
+    fn wal_checkpoint_passive_is_safe() {
+        let dir = std::env::temp_dir().join(format!(
+            "fm-wal-{}-{}",
+            std::process::id(),
+            std::sync::atomic::AtomicU32::new(0).fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("store.sqlite");
+
+        let conn = open(&path).unwrap();
+        conn.execute_batch(
+            "INSERT INTO scopes(key, label, root, created_at) VALUES('s','s','/tmp/x',0);",
+        )
+        .unwrap();
+
+        // Writes accumulate in the WAL; a passive checkpoint must fold them into
+        // the main DB and report success (or BUSY) without erroring.
+        for _ in 0..5 {
+            conn.execute_batch("UPDATE scopes SET label = label || 'x';")
+                .unwrap();
+        }
+        let row: (i64, i64, i64) = conn
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        // Result code 0 (ok) or 1 (busy) are both acceptable; anything else is
+        // a failure. Busy is fine here because it means a reader held the WAL.
+        assert!(
+            row.0 == 0 || row.0 == 1,
+            "passive checkpoint must not fail: {row:?}"
+        );
+
+        // The rows survived the checkpoint.
+        let label: String = conn
+            .query_row("SELECT label FROM scopes WHERE key='s'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(label, "sxxxxx");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

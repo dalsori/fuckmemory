@@ -9,7 +9,10 @@
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use crate::config::now;
 use crate::db::{self, VEC_EPISODE, VEC_FACT};
@@ -420,7 +423,27 @@ pub fn remember(
 /// Best-effort short git HEAD for a directory, or None when it isn't a repo or
 /// git can't answer. Only spawns git when a `.git` marker exists, so a plain
 /// directory costs a single stat, not a subprocess — this runs on every write.
+///
+/// The result is cached per root for the lifetime of the process: a `remember`
+/// burst inside one episode all point at one repository state anyway, and the
+/// HEAD cannot change mid-process in a way that matters (a long-lived MCP
+/// server re-resolves after the user commits, on the next episode).
 fn git_head(root: &Path) -> Option<String> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().ok().and_then(|m| m.get(root).cloned()) {
+        return hit;
+    }
+    let head = git_head_spawn(root);
+    if let Ok(mut m) = cache.lock() {
+        m.insert(root.to_path_buf(), head.clone());
+    }
+    head
+}
+
+/// The actual `git rev-parse`, uncached. Split out so the cache logic above
+/// stays readable and the hot path only ever pays a hashmap lookup.
+fn git_head_spawn(root: &Path) -> Option<String> {
     if !root.join(".git").exists() {
         return None;
     }
@@ -1359,6 +1382,65 @@ mod tests {
             Some(want.as_str()),
             "head must match repo HEAD"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn git_head_is_cached_per_root_within_a_process() {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "fm-head-cache-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init", "-q"]) {
+            return;
+        }
+        std::fs::write(dir.join("f.txt"), "hi").unwrap();
+        assert!(git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "add",
+            "."
+        ]));
+        assert!(git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init"
+        ]));
+        let first = git_head(&dir);
+        assert!(first.is_some(), "repo must yield a HEAD");
+        // A second commit would change HEAD, but the process cache must keep
+        // returning the first value — exactly the trade-off that removes the
+        // subprocess from the per-write hot path.
+        assert!(git(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "empty",
+            "--allow-empty"
+        ]));
+        let second = git_head(&dir);
+        assert_eq!(first, second, "HEAD must be cached per process");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

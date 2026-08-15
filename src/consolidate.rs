@@ -71,6 +71,13 @@ pub fn run(
         )?;
         report.fts_optimized = true;
     }
+
+    // The long-lived MCP server writes on every recall (mark_hits) and every
+    // remember; without a checkpoint the -wal file grows without bound. PASSIVE
+    // returns SQLITE_BUSY if a reader holds the wal at that moment instead of
+    // blocking, so this is always safe to run at session end.
+    let _ = conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()));
+
     Ok(report)
 }
 

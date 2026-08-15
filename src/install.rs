@@ -86,6 +86,12 @@ pub enum HookFormat {
     /// (workspace). Its prompt event is `PreInvocation`; the loop end is `Stop`.
     /// Timeout is in seconds.
     Antigravity,
+    /// OpenCode: there is no settings-file hook channel. Instead OpenCode loads
+    /// TS/JS plugins from `~/.config/opencode/plugins/` (global) or
+    /// `.opencode/plugins/` (project), subscribing to events. The plugin here
+    /// runs `fuckmemory hook prompt` on every user message and injects the
+    /// recalled context back through `experimental.chat.system.transform`.
+    OpenCodePlugin,
 }
 
 pub struct Agent {
@@ -185,8 +191,11 @@ pub const AGENTS: &[Agent] = &[
         format: Format::OpenCode,
         project_instructions: "AGENTS.md",
         global_instructions: Some(".config/opencode/AGENTS.md"),
-        hooks: None,
-        project_hooks: None,
+        hooks: Some((
+            ".config/opencode/plugins/fuckmemory.js",
+            HookFormat::OpenCodePlugin,
+        )),
+        project_hooks: Some(".opencode/plugins/fuckmemory.js"),
     },
     Agent {
         id: "qwen",
@@ -330,6 +339,7 @@ impl HookFormat {
             HookFormat::Anthropic | HookFormat::Cursor | HookFormat::Copilot => 10,
             HookFormat::QwenSettings | HookFormat::GeminiSettings => 10_000,
             HookFormat::Antigravity => 10,
+            HookFormat::OpenCodePlugin => 10,
         }
     }
 
@@ -342,6 +352,7 @@ impl HookFormat {
             HookFormat::Cursor => HOOK_EVENTS_CURSOR,
             HookFormat::Copilot => HOOK_EVENTS_COPILOT,
             HookFormat::Antigravity => HOOK_EVENTS_ANTIGRAVITY,
+            HookFormat::OpenCodePlugin => EVENTS_PASCAL,
         }
     }
 
@@ -485,6 +496,7 @@ fn patch_hooks(
 ) -> Result<What> {
     match format {
         HookFormat::Antigravity => patch_named(path, command, agent, format, dry_run, remove),
+        HookFormat::OpenCodePlugin => patch_opencode_plugin(path, command, agent, dry_run, remove),
         _ if format.grouped() => patch_grouped(path, command, agent, format, dry_run, remove),
         _ => patch_flat(path, command, agent, format, dry_run, remove),
     }
@@ -780,6 +792,102 @@ fn patch_flat(
     } else {
         What::WriteHooks
     })
+}
+
+/// Patch OpenCode's plugin file. OpenCode has no settings-file hook channel —
+/// it loads TS/JS plugins from `plugins/`, which is what the "hooks" slot points
+/// at here. The file is entirely ours (named `fuckmemory.js`), so wiring writes
+/// it wholesale and removal deletes it; unlike the shared settings files there
+/// is nothing of the user's inside to preserve.
+///
+/// The plugin subscribes to `chat.message` (fired when a user prompt lands),
+/// runs `fuckmemory hook prompt` on it, and hands the recalled context back
+/// through `experimental.chat.system.transform` — the closest OpenCode has to a
+/// prompt hook. Autosave and autorecall therefore both work, and the plugin
+/// catches its own failures so OpenCode never breaks on a memory error.
+fn patch_opencode_plugin(
+    path: &Path,
+    command: &str,
+    agent: &str,
+    dry_run: bool,
+    remove: bool,
+) -> Result<What> {
+    if remove {
+        if !path.exists() {
+            return Ok(What::AlreadyDone);
+        }
+        if !dry_run {
+            std::fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+        }
+        return Ok(What::RemoveHooks);
+    }
+
+    if path.exists() {
+        let existing =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let ours =
+            existing.contains("FuckmemoryAutosave") && existing.contains("fuckmemory hook prompt");
+        if ours {
+            return Ok(What::AlreadyDone);
+        }
+        // A plugin file from something else lives here; back it up before
+        // replacing it, like every other file install touches.
+        backup(path, dry_run)?;
+    }
+
+    let contents = opencode_plugin_source(command, agent);
+    if !dry_run {
+        write_atomic(path, &contents)?;
+    }
+    Ok(What::WriteHooks)
+}
+
+/// The OpenCode plugin body, with the resolved `fuckmemory` command embedded.
+fn opencode_plugin_source(command: &str, agent: &str) -> String {
+    // Deliberately plain JS, no imports: OpenCode loads these with Bun and the
+    // plugin must work even when the user has no package.json in the config dir.
+    // Single quotes in the JS body: the outer template literal is a Rust raw
+    // string delimited by `"#`, so double quotes in the JS would close it.
+    format!(
+        r#"{BEGIN}
+// Autosave + autorecall for OpenCode, written by `fuckmemory install --autosave`.
+// Removes cleanly with `fuckmemory uninstall`. The hook process is the single
+// source of truth for what to store and what to inject.
+export const FuckmemoryAutosave = async ({{ $, directory }}) => {{
+  let pendingContext = '';
+
+  // A user prompt has just landed. Run the same hook every other agent runs.
+  'chat.message': async (input, output) => {{
+    try {{
+      const text = (output.parts || [])
+        .filter((p) => p.type === 'text')
+        .map((p) => p.text || '')
+        .join('\n')
+        .trim();
+      if (!text) return;
+      const res = await $`{command} hook prompt --agent {agent} --text ${{text}}`.nothrow().quiet();
+      const body = res.stdout.toString();
+      try {{
+        const parsed = JSON.parse(body);
+        const ctx = parsed?.hookSpecificOutput?.additionalContext;
+        if (typeof ctx === 'string' && ctx.trim()) pendingContext = ctx.trim();
+      }} catch {{ /* not JSON: nothing to inject */ }}
+    }} catch {{ /* a memory error must never break the agent */ }}
+  }},
+
+  // Before the LLM call, hand the recalled memories back as extra system
+  // context, then clear the slot so each prompt injects at most once.
+  'experimental.chat.system.transform': async (input, output) => {{
+    if (!pendingContext) return;
+    output.system = output.system || [];
+    output.system.push('# Memory\\n\\n' + pendingContext);
+    pendingContext = '';
+  }},
+}};
+{END}"#,
+        BEGIN = "// fuckmemory:begin",
+        END = "// fuckmemory:end"
+    )
 }
 
 /// Patch Antigravity's named-map shape, `{ "<name>": { "<Event>": [handlers] } }`.
@@ -1603,9 +1711,9 @@ mod tests {
     #[test]
     fn agents_without_a_known_hook_format_are_left_alone() {
         let home = tmpdir("hooks-unknown");
-        std::fs::create_dir_all(home.join(".config/opencode")).unwrap();
+        std::fs::create_dir_all(home.join(".vscode")).unwrap();
         let mut opts = hook_opts(false);
-        opts.only = Some(vec!["opencode".into()]);
+        opts.only = Some(vec!["vscode".into()]);
         assert!(apply_hooks(&home, &opts, false).unwrap().is_empty());
     }
 
@@ -1623,7 +1731,7 @@ mod tests {
             command: "/bin/fm".into(),
             global: true,
             project: None,
-            only: None,
+            only: Some(vec!["codex".into(), "qwen".into()]),
             instructions: false,
             hooks: true,
             dry_run: false,
@@ -1631,10 +1739,7 @@ mod tests {
 
         let first = apply_hooks(&home, &base, false).unwrap();
         assert!(first.iter().any(|c| c.what == What::WriteHooks));
-        assert!(
-            first.len() >= 2,
-            "claude, codex and qwen all wired: {first:?}"
-        );
+        assert!(first.len() == 2, "codex and qwen wired: {first:?}");
 
         let codex: Value =
             serde_json::from_str(&std::fs::read_to_string(home.join(".codex/hooks.json")).unwrap())
@@ -1782,6 +1887,43 @@ mod tests {
                 .contains("fuckmemory"),
             "uninstall must clear our hook name"
         );
+    }
+
+    /// OpenCode has no settings-file hook channel; install writes a plugin into
+    /// the global plugins dir, and uninstall removes the whole file.
+    #[test]
+    fn opencode_hooks_are_a_plugin_file_removed_wholesale() {
+        let home = tmpdir("hooks-opencode");
+        let base = Options {
+            command: "/usr/local/bin/fuckmemory".into(),
+            global: true,
+            project: None,
+            only: Some(vec!["opencode".into()]),
+            instructions: false,
+            hooks: true,
+            dry_run: false,
+        };
+
+        apply_hooks(&home, &base, false).unwrap();
+        let path = home.join(".config/opencode/plugins/fuckmemory.js");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("FuckmemoryAutosave"), "got {text}");
+        assert!(text.contains("hook prompt --agent opencode"));
+        assert!(text.contains("chat.message"));
+        assert!(text.contains("experimental.chat.system.transform"));
+        assert!(text.contains("/usr/local/bin/fuckmemory"));
+        assert!(text.contains("// fuckmemory:begin"));
+
+        // Idempotent: the plugin file is already ours.
+        let again = apply_hooks(&home, &base, false).unwrap();
+        assert!(
+            again.iter().all(|c| c.what == What::AlreadyDone),
+            "second run should be a no-op: {again:?}"
+        );
+
+        let undo = apply_hooks(&home, &base, true).unwrap();
+        assert!(undo.iter().any(|c| c.what == What::RemoveHooks));
+        assert!(!path.exists(), "uninstall must delete the plugin file");
     }
 
     /// Cursor keeps a flat `{command, timeout}` array per event with a `version`

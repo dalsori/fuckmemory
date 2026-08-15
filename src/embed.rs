@@ -680,12 +680,24 @@ impl VecCache {
 }
 
 /// blake3 of the cache key (scope set + temporal window).
+///
+/// The full timestamp is hashed, never the truncated `tag()` byte: `tag()`
+/// reduces `t % 255` (a ~17-day cycle), so two `--as-of` dates landing in the
+/// same bucket would otherwise share a cache file and serve one another's
+/// historical snapshot.
 fn key_hash(scope_ids: &[i64], when: When) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     for s in scope_ids {
         h.update(&s.to_le_bytes());
     }
-    h.update(&[when.tag()]);
+    match when {
+        When::Live => h.update(&[0u8]),
+        When::Any => h.update(&[2u8]),
+        When::AsOf(t) => {
+            h.update(&[1u8]);
+            h.update(&t.to_le_bytes())
+        }
+    };
     let mut out = [0u8; 32];
     out.copy_from_slice(h.finalize().as_bytes());
     out
@@ -924,6 +936,21 @@ mod tests {
         assert_eq!(idx2.ids, idx.ids);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The `--as-of` cache key must include the full timestamp: `When::tag()`
+    /// truncates to `t % 255` (a ~17-day cycle), so two dates in the same bucket
+    /// used to collide on one cache file and serve each other's snapshot.
+    #[test]
+    fn as_of_cache_keys_do_not_collide_across_buckets() {
+        let a = key_hash(&[1], When::AsOf(1_700_000_000_000));
+        let b = key_hash(&[1], When::AsOf(1_700_000_000_000 + 86_400_000 * 17));
+        assert_ne!(a, b, "17 days apart must produce different cache keys");
+        assert_ne!(
+            key_hash(&[1], When::Live),
+            key_hash(&[1], When::Any),
+            "Live and Any must stay distinct"
+        );
     }
 
     /// Regression test for the bug where the vector leg ignored the temporal

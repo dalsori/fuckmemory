@@ -363,7 +363,7 @@ fn run() -> Result<()> {
         Cmd::Reindex => {
             let mut conn = db::open(&cfg.db_path())?;
             let emb = Embedder::load(&cfg)?;
-            let n = consolidate::reindex(&mut conn, &emb)?;
+            let n = consolidate::reindex(&mut conn, &emb, &cfg.model)?;
             println!("re-embedded {n} fact(s) at dim {}", emb.dim);
             Ok(())
         }
@@ -1464,7 +1464,7 @@ fn cmd_doctor(cfg: &Config, fix: bool) -> Result<()> {
     if reembed {
         println!("  · re-embedding facts");
         let emb = Embedder::load(cfg)?;
-        consolidate::reindex(&mut conn, &emb)?;
+        consolidate::reindex(&mut conn, &emb, &cfg.model)?;
     }
 
     if s.pending > 0 {

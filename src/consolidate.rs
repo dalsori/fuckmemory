@@ -167,8 +167,9 @@ pub fn prune(conn: &Connection, days: i64, dry_run: bool) -> Result<usize> {
 }
 
 /// Recompute every embedding. Needed after switching models, since vectors from
-/// two different models are not comparable.
-pub fn reindex(conn: &mut Connection, emb: &Embedder) -> Result<usize> {
+/// two different models are not comparable. `model` is the configured model id,
+/// stored so `doctor` can verify the stored vectors still match it.
+pub fn reindex(conn: &mut Connection, emb: &Embedder, model: &str) -> Result<usize> {
     let rows: Vec<(i64, String)> = conn
         .prepare("SELECT id, statement FROM facts")?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -189,7 +190,7 @@ pub fn reindex(conn: &mut Connection, emb: &Embedder) -> Result<usize> {
     }
     let n = rows.len();
     tx.commit()?;
-    crate::db::meta_set(conn, "embed_model", &format!("{}:{}", "current", emb.dim))?;
+    crate::db::meta_set(conn, "embed_model", &format!("{model}:{}", emb.dim))?;
     Ok(n)
 }
 

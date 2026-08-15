@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Track the in-progress task.** `fuckmemory task save|status|done` records the
+  goal, current state and files a task is touching, so an interrupted session
+  (token budget, crash, or a different agent taking over) can resume exactly
+  where the last one stopped. Every save is also stored as a searchable episode,
+  so `recall` finds it even before someone asks for `task status`.
+- **OpenCode autosave + autorecall.** OpenCode has no settings-file hook
+  channel, so `install --autosave` now writes a plugin into
+  `~/.config/opencode/plugins/` (or `.opencode/plugins/` per project) that runs
+  the shared hook on every user message and injects the recalled context back.
+- **Windows path redaction.** Ignore globs now match Windows backslash paths
+  (`C:\proj\.env` catches `**/.env`), and `~` expansion accepts `~\` as well as
+  `~/`.
+- **Per-OS usage guides.** A detailed walkthrough (install, autosave, task
+  resumption, config, troubleshooting) now lives in `docs/en/usage.md` and
+  `docs/es/usage.md`; the README keeps the one-glance summary.
 - **Recall shows provenance.** Every memory line now answers "who wrote this,
   and from what state of the repo?" — the writing agent (`[by claude-code]`),
   the short git HEAD at the moment it was learned (`[@ ba85d94]`, captured on
@@ -35,6 +50,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Repository polish for reach.** A custom social-preview image (the link
   preview on GitHub and social networks), a `FUNDING.yml`, and issue/PR
   templates.
+
+### Changed
+
+- **Autosave no longer rebuilds the vector index every prompt.** The persisted
+  mmap index was keyed by `PRAGMA data_version`, which changes on *any* write —
+  including the `mark_hits` popularity counter every prompt runs — so the next
+  prompt paid a full rebuild (~90 ms at 100k facts). A dedicated `index_version`
+  now only moves when fact-vector content changes, so consecutive prompts reuse
+  the mapped index while real fact writes still invalidate it.
+- **Consolidate dedup is scoped to new work.** Duplicate-fact merging compared
+  every live fact against every other (O(n²)) on every session-end. It now only
+  compares facts derived from the episodes being drained, so an idle session
+  does no cosine work at all.
+- **Faster retrieval internals.** `topk` keeps a bounded heap instead of sorting
+  all candidates (O(n log k), memory O(k)); vector loads borrow the blob instead
+  of allocating per row; MMR measures each pair once instead of per-round; file
+  references load in one query per recall instead of one per episode.
+- **WAL growth is bounded.** Consolidate runs a passive checkpoint at session
+  end, so a long-lived MCP server's `-wal` file stops growing without bound.
+- **Round-trip export/import keeps everything.** Import now restores raw
+  episodes, their file references, and fact provenance, not just the distilled
+  facts; re-importing is idempotent.
+- **Two correctness fixes.** `--as-of` cache keys now include the full timestamp
+  (the old `t % 255` collided across ~17-day windows), and `reindex` stores the
+  real model id so `doctor` stops reporting a permanent mismatch.
 
 ## [1.1.2] - 2026-08-09
 

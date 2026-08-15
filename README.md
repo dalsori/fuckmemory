@@ -103,6 +103,9 @@ Graphiti model, without Neo4j.
 
 ## Install
 
+> Full per-OS walkthroughs, everyday usage, config and troubleshooting live in
+> the [usage guide](docs/en/usage.md) ([español](docs/es/usage.md)).
+
 **The one-liner** (no Rust toolchain, no clone) — installs the newest prebuilt
 binary and wires every detected agent, autosave included:
 
@@ -245,7 +248,7 @@ second one the tools exist and nothing ever calls them.
 | OpenAI Codex CLI | `~/.codex/config.toml` | `AGENTS.md` | `./.codex/hooks.json` |
 | Gemini CLI | `~/.gemini/settings.json` | `AGENTS.md` | `./.gemini/settings.json` |
 | Antigravity CLI | `~/.gemini/config/mcp_config.json`, `./.agents/mcp_config.json` | `AGENTS.md` | `~/.gemini/config/hooks.json`, `./.agents/hooks.json` |
-| OpenCode | `~/.config/opencode/opencode.json[c]` | `AGENTS.md` | — |
+| OpenCode | `~/.config/opencode/opencode.json[c]` | `AGENTS.md` | `~/.config/opencode/plugins/fuckmemory.js`, `./.opencode/plugins/fuckmemory.js` |
 | Qwen Code | `~/.qwen/settings.json` | `AGENTS.md` | `./.qwen/settings.json` |
 | Cursor | `~/.cursor/mcp.json` | `AGENTS.md` | `./.cursor/hooks.json` |
 | GitHub Copilot CLI | `~/.copilot/mcp-config.json` | `AGENTS.md` | `~/.copilot/hooks/fuckmemory.json`, `./.github/hooks/fuckmemory.json` |
@@ -258,7 +261,7 @@ and never duplicates or clobbers what you wrote around it.
 
 With `--autosave`, it also writes hooks into the agents that support them
 (Claude Code, OpenAI Codex CLI, Gemini CLI, Antigravity CLI, Qwen Code, Cursor,
-Copilot CLI) — see below.
+Copilot CLI, OpenCode) — see below.
 
 Everything the tool writes lives in one directory you can delete:
 `~/.local/share/fuckmemory` (override with `FUCKMEMORY_HOME`).
@@ -277,13 +280,16 @@ Anthropic JSON shape used by Claude Code (`settings.json`), Codex
 and Copilot CLI use their own flat `hooks.json` shapes (`bash` keys, camelCase
 events). Antigravity uses a named-map `hooks.json` with `PreInvocation`/`Stop`
 events, and since its prompt event only points at the conversation transcript,
-the prompt is read back from there. Agents without a verified hook format are
-left alone rather than guessed at.
+the prompt is read back from there. OpenCode has no settings-file hook channel,
+so install writes a plugin into `~/.config/opencode/plugins/` (or
+`.opencode/plugins/` per project) that runs the same hook on every user message
+and injects the recalled context back. Agents without a verified hook format
+are left alone rather than guessed at.
 
 Recall-injection only happens where the hook channel can carry context back
-(Claude Code, Codex, Qwen, Gemini, Antigravity); Cursor and Copilot CLI autosave
-every prompt but their hooks do not accept injected context, so autorecall for
-them relies on the model calling the MCP tools.
+(Claude Code, Codex, Qwen, Gemini, Antigravity, OpenCode); Cursor and Copilot
+CLI autosave every prompt but their hooks do not accept injected context, so
+autorecall for them relies on the model calling the MCP tools.
 
 - **Every prompt is kept**, verbatim, as a searchable episode. Nothing is lost.
 - **Only prompts that read like durable knowledge become facts.** "never force
@@ -500,6 +506,11 @@ fuckmemory forget <id> | --query <text> [--hard]
 fuckmemory timeline <entity>
 fuckmemory explain <query>         # per-retriever breakdown
 
+fuckmemory task save <state> [--file F,...] [--goal "what we're doing"]
+fuckmemory task status            # resume: what the previous session left
+fuckmemory task done [--note ...] # close the task; last save stays searchable
+fuckmemory task remember <text>   # set the checkpoint AND store a durable memory
+
 fuckmemory stats | scopes
 fuckmemory bench [--facts N] [--rounds N] [--queries N]   # write/recall latency
 fuckmemory consolidate             # merge duplicates, compact indexes
@@ -509,6 +520,29 @@ fuckmemory model pull | which | cache [--force] | verify
 fuckmemory export | import <file>
 fuckmemory serve                   # MCP stdio; agents call this
 ```
+
+### Resuming interrupted work
+
+An agent loses its context when a session ends — a token budget hits, the
+machine reboots, or a different agent takes over. `task save` records what the
+work is doing *right now* so the next session — same agent or a different one —
+can pick up exactly where the last one stopped instead of re-deriving the plan
+and re-touching files:
+
+```bash
+# The agent that is about to be interrupted (or is mid-work and wants a checkpoint):
+fuckmemory task save "wired the opencode plugin, verifying install/uninstall" \
+  --file src/install.rs --goal "add opencode autosave hooks"
+
+# Whoever resumes (maybe a different agent, maybe tomorrow):
+fuckmemory task status
+```
+
+Every `task save` is also stored as a searchable episode, so a resuming agent
+finds it through `recall` even before it thinks to ask for `task status`.
+Updating the checkpoint keeps the original goal and open date; `task done`
+closes the task while leaving its last state readable, and a final note records
+what shipped or what blocked it.
 
 ### Scopes
 
@@ -601,11 +635,11 @@ fuckmemory consolidate && fuckmemory prune --days 90
 - **Kimi Code** is detected but its MCP config format is unverified, so a snippet
   is printed rather than a guess written into a real config file.
 - **Not every agent's hook carries context back.** Autosave reaches Claude Code,
-  Codex, Gemini CLI, Antigravity, Qwen, Cursor and Copilot CLI; recall injection
-  works through the ones whose hook channel accepts context (Claude Code, Codex,
-  Qwen, Gemini, Antigravity). Cursor and Copilot CLI autosave every prompt but
-  ignore injected context, so autorecall there relies on the model calling the
-  MCP tools.
+  Codex, Gemini CLI, Antigravity, Qwen, Cursor, Copilot CLI and OpenCode; recall
+  injection works through the ones whose hook channel accepts context (Claude
+  Code, Codex, Qwen, Gemini, Antigravity, OpenCode). Cursor and Copilot CLI
+  autosave every prompt but ignore injected context, so autorecall there relies
+  on the model calling the MCP tools.
 - **Salience is marker-based.** No model runs in the write path, so a rule phrased
   without any of the markers ("the replica lags by an hour") is kept as an
   episode, not promoted to a fact. Recall reads facts; `recall --raw` reads both.
@@ -617,7 +651,7 @@ fuckmemory consolidate && fuckmemory prune --days 90
 ## Development
 
 ```bash
-cargo test                  # 170 tests: 148 unit, 22 integration
+cargo test                  # 189 tests: 165 unit, 24 integration
 cargo build --release
 ```
 

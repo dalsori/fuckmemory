@@ -162,7 +162,7 @@ pub fn render(cp: &TaskCheckpoint) -> String {
 }
 
 fn ymd(t: i64) -> String {
-    let days = t.div_euclid(86_400);
+    let days = t.div_euclid(86_400_000); // now() is epoch milliseconds
     let (y, m, d) = civil_from_days(days);
     format!("{y:04}-{m:02}-{d:02}")
 }

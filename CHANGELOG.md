@@ -76,6 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the old `t % 255` collided across ~17-day windows), and `reindex` stores the
   real model id so `doctor` stops reporting a permanent mismatch.
 
+## [1.2.0] - 2026-08-15
+
 ## [1.1.2] - 2026-08-09
 
 ### Added

@@ -47,9 +47,15 @@ pub fn run(
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    if emb.is_some() {
+    // Dedup the facts the pending episodes derived, scoped to those episodes.
+    // This used to compare every live fact against every other (O(n^2)) and ran
+    // on every consolidate even with an empty queue; now it only looks at facts
+    // new since the last run, so a session-end hook with nothing new does no
+    // cosine work at all.
+    if emb.is_some() && !pending.is_empty() {
+        let new_episodes: Vec<i64> = pending.iter().map(|(_, e)| *e).collect();
         for sid in &scopes {
-            report.facts_merged += merge_duplicates_in_scope(conn, *sid)?;
+            report.facts_merged += merge_new_facts_in_scope(conn, *sid, &new_episodes)?;
         }
     }
 
@@ -81,13 +87,45 @@ pub fn run(
     Ok(report)
 }
 
-/// Collapse semantically identical live facts within one scope.
+/// Collapse facts derived from the given (new) episodes that duplicate an
+/// already-live fact in the scope, and duplicates among themselves.
 ///
 /// The survivor is the most recently recorded one; it inherits the loser's hit
 /// count so a long-used memory does not lose its ranking boost by being rephrased.
-fn merge_duplicates_in_scope(conn: &mut Connection, scope_id: i64) -> Result<usize> {
+///
+/// Only the facts of `new_episodes` are compared, against the scope's live
+/// facts and each other — an O(new x live) scan. The old implementation walked
+/// every live fact against every other (O(n^2)) on every consolidate even when
+/// nothing new had arrived.
+fn merge_new_facts_in_scope(
+    conn: &mut Connection,
+    scope_id: i64,
+    new_episodes: &[i64],
+) -> Result<usize> {
+    // The candidates: live facts derived from the pending episodes, newest id
+    // first. VecIndex keeps them ordered by id; facts from a newer episode have
+    // larger ids, so iterating the vec in reverse visits newest first — the
+    // natural survivor ordering for a tie.
     let idx = VecIndex::load_facts(conn, &[scope_id], When::Live)?;
     if idx.ids.len() < 2 {
+        return Ok(0);
+    }
+    if new_episodes.is_empty() {
+        return Ok(0);
+    }
+    let placeholders = vec!["?"; new_episodes.len()].join(",");
+    let ep_ph = placeholders;
+    let candidate_ids: Vec<i64> = conn
+        .prepare(&format!(
+            "SELECT id FROM facts
+             WHERE scope_id = ?1 AND episode_id IN ({ep_ph}) AND invalidated_at IS NULL"
+        ))?
+        .query_map(
+            rusqlite::params_from_iter(std::iter::once(&scope_id).chain(new_episodes.iter())),
+            |r| r.get(0),
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if candidate_ids.is_empty() {
         return Ok(0);
     }
 
@@ -103,6 +141,11 @@ fn merge_duplicates_in_scope(conn: &mut Connection, scope_id: i64) -> Result<usi
         }
     }
 
+    // Position of each id in the index, so we can look up the candidate vectors
+    // (and, for comparing candidate-vs-candidate, skip recomputing on the fly).
+    let pos: std::collections::HashMap<i64, usize> =
+        idx.ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+
     let mut merged = 0usize;
     let mut dead: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let ts = now();
@@ -110,17 +153,26 @@ fn merge_duplicates_in_scope(conn: &mut Connection, scope_id: i64) -> Result<usi
     // with SQLITE_BUSY when a deferred transaction tries to upgrade. See store.rs.
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
-    for i in 0..idx.ids.len() {
-        let a = idx.ids[i];
+    for &a in &candidate_ids {
         if dead.contains(&a) {
             continue;
         }
-        for j in (i + 1)..idx.ids.len() {
+        let Some(&pa) = pos.get(&a) else {
+            continue;
+        };
+        // Compare the candidate against every other live fact in the scope,
+        // and against the later candidates (which lie after it in id order
+        // when both are candidates; iterating idx.ids in reverse makes later
+        // facts smaller ids, so scan the full set and skip self/dead).
+        for j in 0..idx.ids.len() {
+            if j == pa {
+                continue;
+            }
             let b = idx.ids[j];
             if dead.contains(&b) {
                 continue;
             }
-            if cosine_q(idx.row(i), idx.row(j)) < MERGE_AT {
+            if cosine_q(idx.row(pa), idx.row(j)) < MERGE_AT {
                 continue;
             }
             let (ta, ha) = meta.get(&a).copied().unwrap_or((0, 0));
@@ -277,6 +329,50 @@ mod tests {
             .query_row("SELECT count(*) FROM pending", [], |r| r.get(0))
             .unwrap();
         assert_eq!(after, 0);
+    }
+
+    /// Merge is scoped to the new episodes: an old duplicate and a fresh one
+    /// collapse, and with an empty pending queue nothing is touched.
+    #[test]
+    fn merge_new_facts_only_looks_at_the_pending_episodes() {
+        let (mut conn, sc) = setup();
+
+        // A fact, then its rephrasing via a later episode. Without a model in
+        // tests, give both the same vector so cosine(a,b) hits MERGE_AT.
+        let old = remember(&mut conn, &sc, None, &note("always use pnpm")).unwrap();
+        let new = remember(&mut conn, &sc, None, &note("always use pnpm for installs")).unwrap();
+        let (fa, fb) = (old.fact_ids[0], new.fact_ids[0]);
+        for id in [fa, fb] {
+            crate::embed::put_vec(
+                &conn,
+                crate::db::VEC_FACT,
+                id,
+                &crate::embed::quantize(&[1.0, 1.0, 1.0, 1.0]),
+            )
+            .unwrap();
+        }
+
+        let ep: Option<i64> = conn
+            .query_row("SELECT episode_id FROM facts WHERE id = ?1", [fb], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let merged =
+            merge_new_facts_in_scope(&mut conn, sc.id, &[ep.expect("has an episode")]).unwrap();
+        assert_eq!(merged, 1, "the fresh duplicate must be merged away");
+
+        let live: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM facts WHERE invalidated_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, 1, "only the survivor stays live");
+
+        // With nothing pending there is nothing to do.
+        let zero = merge_new_facts_in_scope(&mut conn, sc.id, &[]).unwrap();
+        assert_eq!(zero, 0);
     }
 
     #[test]

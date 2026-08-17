@@ -238,10 +238,33 @@ fn replace_binary(staged: &Path, target: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn replace_binary(staged: &Path, target: &Path) -> Result<()> {
+    // Windows refuses to overwrite or delete a *running* executable, but it
+    // allows renaming it. So the self-update dance is: move the current binary
+    // aside, slide the new one into place, and let the old file be reclaimed
+    // once the process finally exits — the next update renames over it. The old
+    // file stays on disk until the swap completes, so a crash mid-update can
+    // never leave the install without a binary.
+    let old = target.with_extension("old.exe");
+    let _ = std::fs::remove_file(&old);
+    if std::fs::rename(target, &old).is_ok() {
+        if std::fs::rename(staged, target).is_ok() {
+            // Fails while this process is still running from `old`; that is
+            // expected and harmless — the next update replaces it.
+            let _ = std::fs::remove_file(&old);
+            return Ok(());
+        }
+        // The swap failed; put the old binary back so the install is intact.
+        let _ = std::fs::rename(&old, target);
+        let _ = std::fs::remove_file(staged);
+        bail!(
+            "replacing {} — the binary was in use; close running sessions and retry",
+            target.display()
+        );
+    }
+    // The target wasn't locked: plain rename, then copy as a last resort.
     if std::fs::rename(staged, target).is_ok() {
         return Ok(());
     }
-    // Fallback: copy over. On failure, tell the user to do it by hand.
     std::fs::copy(staged, target).with_context(|| {
         format!(
             "replacing {} — try closing running sessions",
@@ -255,6 +278,7 @@ fn replace_binary(staged: &Path, target: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::io::Read;
 
     #[test]

@@ -37,24 +37,32 @@ Después ejecuta `fuckmemory install` para conectar tus agentes — ver
 
 ## Windows
 
-Abre **PowerShell** y descarga el zip para `x86_64-pc-windows-msvc` desde la
-[página de releases](https://github.com/dalsori/fuckmemory/releases):
+**Instalación en un comando** (sin toolchain de Rust, sin clonar) — instala el
+binario precompilado más nuevo en `%LOCALAPPDATA%\fuckmemory`, lo añade a tu
+PATH y conecta todos los agentes detectados, con autosave incluido:
 
 ```powershell
-$target = "x86_64-pc-windows-msvc"
-$ver = "<última-versión>"
-Invoke-WebRequest `
-  "https://github.com/dalsori/fuckmemory/releases/download/v$ver/fuckmemory-$target.zip" `
-  -OutFile "$env:TEMP\fuckmemory.zip"
-Expand-Archive "$env:TEMP\fuckmemory.zip" "$env:LOCALAPPDATA\fuckmemory" -Force
+irm https://raw.githubusercontent.com/dalsori/fuckmemory/master/install.ps1 | iex
 ```
 
-Añade `%LOCALAPPDATA%\fuckmemory` a tu PATH, o referencia `fuckmemory.exe` por
-su ruta completa al instalar:
+Desde un clon del repositorio, para compilar desde el código fuente:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1        # compilar + instalar + conectar
+powershell -ExecutionPolicy Bypass -File install.ps1 -NoAutosave -NoModel -DryRun
+```
+
+O a mano: descarga el asset `fuckmemory-x86_64-pc-windows-msvc.zip` de la
+[página de releases](https://github.com/dalsori/fuckmemory/releases), extráelo
+en algún lugar de tu PATH (o en `%LOCALAPPDATA%\fuckmemory`), y ejecuta:
 
 ```powershell
 fuckmemory install --command "$env:LOCALAPPDATA\fuckmemory\fuckmemory.exe" --autosave
 ```
+
+El instalador pasa la ruta absoluta del binario, así que los agentes lanzados
+desde una GUI (que pueden tener un PATH distinto al de tu shell) también lo
+encuentran.
 
 ## Cualquier SO, desde crates.io o el código fuente
 

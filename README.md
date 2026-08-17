@@ -27,6 +27,12 @@ fuckmemory install --autosave
 # injected back, automatically
 ```
 
+Windows, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/dalsori/fuckmemory/master/install.ps1 | iex
+```
+
 Per-OS installs (Windows zip, Homebrew, crates.io), wiring agents, and every
 feature have their own guide in the [docs](docs/) — one per task, in
 [English](docs/en/index.md) and [español](docs/es/index.md). The README is the

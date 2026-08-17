@@ -43,6 +43,24 @@ fuckmemory forget <id> --hard     # borrar definitivamente
 Después ejecuta `fuckmemory consolidate && fuckmemory prune --days 0` para
 limpiar el episodio crudo.
 
+## Compilar en Windows falla en `ar.exe` con el error `0xc000012f`
+
+Algunos builds de `gcc` de Scoop/winlibs traen un `ar.exe` roto que crashea con
+`STATUS_BAD_IMAGE (0xc000012f)` en cuanto intenta cargar el plugin LTO de
+`lib\bfd-plugins\libdep.a` (un bug de empaquetado de binutils ya conocido). Cualquier
+`cargo build --release` sobre el toolchain `x86_64-pc-windows-gnu` puede
+tropezar con él, porque el perfil de release usa `lto = "fat"`.
+
+Arregla el entorno, no el proyecto:
+
+- Usa el **instalador de un comando** en vez de compilar — `irm
+  https://raw.githubusercontent.com/dalsori/fuckmemory/master/install.ps1 | iex`
+  descarga el binario precompilado y nunca toca cargo/gcc.
+- O instala el toolchain estable: `rustup toolchain install stable-x86_64-pc-windows-msvc`
+  y ponlo como predeterminado — el build MSVC no usa `ar.exe`.
+- O elimina el plugin roto: renombra `lib\bfd-plugins\libdep.a` en el directorio
+  del gcc de Scoop para que `ar.exe` deje de intentar cargarlo.
+
 ## El `fuckmemory` del PATH está desactualizado
 
 Si una flag que existe en el código fuente se rechaza como "unexpected

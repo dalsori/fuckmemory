@@ -43,6 +43,24 @@ fuckmemory forget <id> --hard     # delete permanently
 Then run `fuckmemory consolidate && fuckmemory prune --days 0` to clean up the
 raw episode.
 
+## Building on Windows fails in `ar.exe` with error `0xc000012f`
+
+Some Scoop/winlibs `gcc` builds ship a broken `ar.exe` that crashes with
+`STATUS_BAD_IMAGE (0xc000012f)` the moment it loads the LTO plugin from
+`lib\bfd-plugins\libdep.a` (a known upstream binutils packaging bug). Any
+`cargo build --release` on the `x86_64-pc-windows-gnu` toolchain can hit it,
+because the release profile uses `lto = "fat"`.
+
+Fix the environment, not the project:
+
+- Run the **one-line installer** instead of building — `irm
+  https://raw.githubusercontent.com/dalsori/fuckmemory/master/install.ps1 | iex`
+  downloads the prebuilt binary and never touches cargo/gcc.
+- Or install the stable toolchain: `rustup toolchain install stable-x86_64-pc-windows-msvc`
+  and set it as default — the MSVC build does not use `ar.exe`.
+- Or remove the broken plugin: rename `lib\bfd-plugins\libdep.a` in the Scoop
+  gcc directory so `ar.exe` stops trying to load it.
+
 ## `fuckmemory` on the PATH is stale
 
 If a flag that exists in the source rejects as "unexpected argument", the binary

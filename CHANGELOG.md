@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Windows one-line installer.** `install.ps1` mirrors `install.sh`: `irm
+  https://raw.githubusercontent.com/dalsori/fuckmemory/master/install.ps1 | iex`
+  downloads the newest prebuilt Windows binary to `%LOCALAPPDATA%\fuckmemory`,
+  adds it to your PATH and registers every detected agent, autosave included —
+  no manual zip download or editing of PATH by hand.
+- **`fuckmemory update` works on Windows.** A running executable cannot be
+  overwritten or deleted on Windows, which silently broke self-updates there.
+  The update now renames the running binary aside, swaps the new one in, and
+  lets the old file be reclaimed once the process exits — so a stale
+  `cargo install` can be brought up to date with `fuckmemory update`.
 - **Track the in-progress task.** `fuckmemory task save|status|done` records the
   goal, current state and files a task is touching, so an interrupted session
   (token budget, crash, or a different agent taking over) can resume exactly

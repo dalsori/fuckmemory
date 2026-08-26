@@ -1027,11 +1027,17 @@ mod tests {
         let mmap = unsafe { memmap2::Mmap::map(&f) }.unwrap();
         assert!(VecIndexFile::read(&mmap).is_none(), "too short must fail");
 
-        // Wrong magic.
+        // Wrong magic. The mapping must be dropped before the file is rewritten:
+        // on Windows a live mapping locks the file, and the write below would
+        // fail with "a user-mapped section is open".
+        drop(mmap);
+        drop(f);
         std::fs::write(&path, b"NOTVECv1").unwrap();
         let f = std::fs::File::open(&path).unwrap();
         let mmap = unsafe { memmap2::Mmap::map(&f) }.unwrap();
         assert!(VecIndexFile::read(&mmap).is_none(), "bad magic must fail");
+        drop(mmap);
+        drop(f);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1119,6 +1125,7 @@ mod tests {
             files: vec![],
             meta: None,
             derive: true,
+            session_id: None,
         };
         let old = store::remember(&mut conn, &sc, None, &mk("npm"))
             .unwrap()
@@ -1169,6 +1176,7 @@ mod tests {
                 files: vec![],
                 meta: None,
                 derive: false,
+                session_id: None,
             },
         )
         .unwrap();
@@ -1252,6 +1260,7 @@ mod tests {
                     files: vec![],
                     meta: None,
                     derive: true,
+                    session_id: None,
                 },
             )
             .unwrap();

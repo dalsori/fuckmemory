@@ -112,6 +112,7 @@ pub fn remember_as_episode(
         files: vec![],
         meta: None,
         derive: false,
+        session_id: None,
     };
     for f in &cp.files {
         let path = f.trim();

@@ -4,7 +4,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.3.0] - 2026-08-26
+
+### Added
+
+- **Work sessions, across agents.** A session groups a project's episodes and
+  facts into a named, idle-closed container — `work-2026-08-26` by default, or
+  a name you give `session start <name> --goal "..."`. Autosave tags every
+  stored prompt into the scope's session automatically; no command is required
+  for any of it.
+- **Automatic cross-agent handoff.** When a *different* agent's conversation
+  starts in a project whose session still holds work, the first real prompt is
+  injected the accumulated context — name, goal, facts learned, recent episodes
+  and the active `task` checkpoint — before the ordinary recalled memories.
+  Work in Claude Code, pick up in OpenCode: the context arrives without ritual.
+- **`fuckmemory session start|list|show|end`.** The tmux-style handle on the
+  same data: name a stretch of work, see what a project has been doing, render
+  the whole narrative, and close a session when the work ships.
+- **Schema v3.** A `sessions` table plus `episodes.session_id`; existing stores
+  migrate in place. Tune with `[session] idle_hours = 24` and disable the
+  handoff with `[autorecall] session = false`.
+
+### Changed
+
+- **Hooks track sessions.** Every prompt touches its session's `last_at` (so the
+  idle clock starts from real activity, and session-end too), and stored
+  episodes link to the session they were learned in. Episodes without an agent
+  session id still tag into the current session but never trigger a handoff.
+
+## [1.2.0] - 2026-08-15
 
 ### Added
 
@@ -86,8 +114,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Two correctness fixes.** `--as-of` cache keys now include the full timestamp
   (the old `t % 255` collided across ~17-day windows), and `reindex` stores the
   real model id so `doctor` stops reporting a permanent mismatch.
-
-## [1.2.0] - 2026-08-15
 
 ## [1.1.2] - 2026-08-09
 

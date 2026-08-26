@@ -57,6 +57,10 @@ one-glance summary; the docs are the detail.
   believed on any past date even after the fact was overwritten.
 - **Resume interrupted work.** `fuckmemory task save|status|done` leaves a
   checkpoint so any agent can continue where a cut-short session stopped.
+- **Cross-agent handoff.** Autosave groups a project's work into sessions; when
+  a *different* agent's conversation starts in that project, the first prompt
+  is handed the accumulated context (goal, decisions, files, task) — so you can
+  work in Claude Code and pick up in OpenCode with no ritual.
 - **Owned by you.** One database, one model, one config directory; `uninstall`
   reverses every byte `install` wrote.
 
@@ -95,6 +99,7 @@ fuckmemory forget 42                                  # retract (soft)
 fuckmemory timeline fly.io                            # history of an entity
 fuckmemory explain "deploy"                           # why this ranking?
 fuckmemory task status                                # resume interrupted work
+fuckmemory session list                               # what a project has been doing
 ```
 
 ## Autosave
@@ -106,8 +111,10 @@ fuckmemory install --autosave     # or toggle it in `fuckmemory tui`
 Every prompt is kept verbatim as a searchable episode; only prompts that read
 like durable knowledge become facts; acknowledgements are dropped; credentials
 and named sensitive files are redacted before anything hits the disk. Relevant
-memories are injected back into each prompt, capped at a token budget. At
-session end the hook consolidates instead of storing. The whole round trip costs
+memories are injected back into each prompt, capped at a token budget. Prompts
+also flow into the project's work session, so the first prompt of a *new*
+conversation is handed the accumulated context (see [the session guide](docs/en/session.md)).
+At session end the hook consolidates instead of storing. The whole round trip costs
 **~5 ms per prompt**.
 
 ## How retrieval works
@@ -177,7 +184,7 @@ offline and free.
 ## Development
 
 ```bash
-cargo test                  # 189 tests: 165 unit, 24 integration
+cargo test                  # 199 tests: 174 unit, 25 integration
 cargo build --release
 ```
 

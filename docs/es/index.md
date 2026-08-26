@@ -7,6 +7,7 @@
 | [Autosave](autosave.md) | Guardar cada prompt e inyectar memorias automáticamente |
 | [Comandos](commands.md) | El CLI de uso diario: remember, recall, forget, timeline, explain |
 | [Tarea](task.md) | Retomar un trabajo después de una interrupción |
+| [Sesión](session.md) | Agrupar el trabajo de un proyecto entre agentes y retomarlo |
 | [Configuración](config.md) | Archivo de ajustes, scopes, variables de entorno |
 | [Mantenimiento](maintenance.md) | Consolidar, podar, doctor, bench, export/import |
 | [Solución de problemas](troubleshooting.md) | Problemas comunes y sus arreglos |

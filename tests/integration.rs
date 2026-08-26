@@ -819,3 +819,70 @@ fn task_checkpoint_survives_across_sessions() {
     let (out, _, _) = run(&home, &["task", "status"]);
     assert!(out.contains("[closed] verified"), "got {out}");
 }
+
+#[test]
+fn sessions_group_work_across_agents_and_resume_it() {
+    let home = scratch("sessions");
+    let autosave = [("FUCKMEMORY_AUTOSAVE", "1"), ("FUCKMEMORY_AUTORECALL", "1")];
+
+    // A named session, the tmux-style handle for "this stretch of work".
+    let (out, err, ok) = run(
+        &home,
+        &["session", "start", "release", "--goal", "ship 1.3"],
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("session 'release' open"), "got {out}");
+
+    // Claude Code works; autosave tags the prompt into the session.
+    let payload = serde_json::json!({
+        "session_id": "claude-1",
+        "cwd": home.join("proj").to_string_lossy(),
+        "prompt": "we decided to deploy through fly.io and use pnpm",
+    })
+    .to_string();
+    let (out, err, ok) = hook(
+        &home,
+        &["hook", "prompt", "--agent", "claude-code"],
+        &payload,
+        &autosave,
+    );
+    assert!(ok, "{err}");
+    assert!(
+        !out.contains("Work context"),
+        "nothing to hand over yet: {out}"
+    );
+
+    // OpenCode continues the work next conversation; the accumulated context is
+    // handed back automatically.
+    let payload2 = serde_json::json!({
+        "session_id": "opencode-1",
+        "cwd": home.join("proj").to_string_lossy(),
+        "prompt": "fix the deploy pipeline tests",
+    })
+    .to_string();
+    let (out, err, ok) = hook(
+        &home,
+        &["hook", "prompt", "--agent", "opencode"],
+        &payload2,
+        &autosave,
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("Work context"), "handoff injected: {out}");
+    assert!(out.contains("fly.io"), "session content handed over: {out}");
+
+    // Both agents appear in the session, and `show` renders the whole narrative.
+    let (out, _, ok) = run(&home, &["session", "list"]);
+    assert!(ok);
+    assert!(out.contains("claude-code"), "got {out}");
+    assert!(out.contains("opencode"), "got {out}");
+
+    let (out, _, ok) = run(&home, &["session", "show", "release"]);
+    assert!(ok);
+    assert!(out.contains("fly.io"), "got {out}");
+    assert!(out.contains("ship 1.3"), "goal present: {out}");
+
+    // Closing it stops new prompts from flowing in.
+    let (out, err, ok) = run(&home, &["session", "end", "release"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("closed"), "got {out}");
+}

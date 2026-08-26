@@ -635,6 +635,7 @@ mod tests {
                 files: vec![],
                 meta: None,
                 derive: true,
+                session_id: None,
             },
         )
         .unwrap();

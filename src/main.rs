@@ -4,14 +4,14 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
-use fuckmemory::config::{now, Config};
+use fuckmemory::config::{now, Config, DAY};
 use fuckmemory::embed::{Embedder, VecCache};
 use fuckmemory::graph::When;
 use fuckmemory::install::{self, What};
 use fuckmemory::pack::{self, PackOptions};
 use fuckmemory::retrieve::{self, Query};
 use fuckmemory::store::{self, FactInput, RememberInput};
-use fuckmemory::{consolidate, db, graph, mcp, scope, task, update};
+use fuckmemory::{consolidate, db, graph, mcp, scope, sessions, task, update};
 
 #[derive(Parser)]
 #[command(
@@ -237,6 +237,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TaskCmd,
     },
+    /// Group a project's recent work into sessions any agent can resume
+    Session {
+        #[command(subcommand)]
+        cmd: SessionCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -271,6 +276,31 @@ enum TaskCmd {
         file: Vec<String>,
         #[arg(long)]
         goal: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCmd {
+    /// Start (or reopen) a named work session. The next prompt in this project
+    /// flows into it, from any agent — autosave tags it automatically.
+    Start {
+        /// Human handle, e.g. "release-1.3"
+        name: String,
+        /// The goal of the work, kept so a resuming agent knows the point
+        #[arg(long)]
+        goal: Option<String>,
+    },
+    /// List the sessions in this project, newest first
+    List,
+    /// Show everything recorded in a session: episodes, facts, and the task
+    Show {
+        /// Session name, as shown by `session list`
+        name: String,
+    },
+    /// Close a session so new prompts start a fresh one
+    End {
+        /// Session name, as shown by `session list`
+        name: String,
     },
 }
 
@@ -459,6 +489,7 @@ fn run() -> Result<()> {
         }
         Cmd::Import { file, scope: s } => cmd_import(&cfg, file, s),
         Cmd::Task { cmd } => cmd_task(&cfg, cmd),
+        Cmd::Session { cmd } => cmd_session(&cfg, cmd),
     }
 }
 
@@ -864,6 +895,7 @@ fn cmd_remember(
             files: file_inputs,
             meta: None,
             derive: true,
+            session_id: None,
         },
     )?;
     if out.duplicate {
@@ -1170,6 +1202,7 @@ fn cmd_bench(cfg: &Config, facts: usize, rounds: usize, queries: usize) -> Resul
                 files: vec![],
                 meta: None,
                 derive: true,
+                session_id: None,
             },
         )?;
     }
@@ -1197,6 +1230,7 @@ fn cmd_bench(cfg: &Config, facts: usize, rounds: usize, queries: usize) -> Resul
                 files: vec![],
                 meta: None,
                 derive: true,
+                session_id: None,
             },
         )?;
         write_us.push(t.elapsed().as_micros());
@@ -1594,6 +1628,83 @@ fn cmd_import(cfg: &Config, file: PathBuf, scope_spec: Option<String>) -> Result
         report.episodes, report.facts, report.files, sc.label
     );
     Ok(())
+}
+
+fn cmd_session(cfg: &Config, cmd: SessionCmd) -> Result<()> {
+    match cmd {
+        SessionCmd::Start { name, goal } => {
+            let conn = db::open(&cfg.db_path())?;
+            let sc = scope::resolve(&conn, None, &cwd())?;
+            let s = sessions::start(&conn, &sc, &name, goal.as_deref())?;
+            println!("session '{}' open in '{}'", s.name, sc.label);
+            Ok(())
+        }
+        SessionCmd::List => {
+            let conn = db::open(&cfg.db_path())?;
+            let sc = scope::resolve(&conn, None, &cwd())?;
+            let all = sessions::list(&conn, sc.id)?;
+            if all.is_empty() {
+                println!("no sessions yet in '{}'", sc.label);
+                return Ok(());
+            }
+            let ts = now();
+            let idle = DAY.saturating_mul(cfg.session_idle_hours as i64);
+            println!(
+                "{:<20} {:<6} {:<10} {:<10} {:>4}  agents",
+                "NAME", "STATE", "OPENED", "LAST", "EPS"
+            );
+            for s in all {
+                let state = if s.is_open(ts, idle) {
+                    "open"
+                } else if s.closed_at.is_some() {
+                    "closed"
+                } else {
+                    "idle"
+                };
+                println!(
+                    "{:<20} {:<6} {:<10} {:<10} {:>4}  {}",
+                    s.name,
+                    state,
+                    pack::ymd(s.first_at),
+                    pack::ymd(s.last_at),
+                    s.episode_count,
+                    s.agents().join(",")
+                );
+            }
+            Ok(())
+        }
+        SessionCmd::Show { name } => {
+            let conn = db::open(&cfg.db_path())?;
+            let sc = scope::resolve(&conn, None, &cwd())?;
+            let Some(s) = sessions::get_by_name(&conn, sc.id, &name)? else {
+                anyhow::bail!(
+                    "no session {name:?} in '{}' — `fuckmemory session list`",
+                    sc.label
+                );
+            };
+            print!(
+                "{}",
+                sessions::render_show(&conn, &s, cfg.session_idle_hours, &sc.label)?
+            );
+            Ok(())
+        }
+        SessionCmd::End { name } => {
+            let conn = db::open(&cfg.db_path())?;
+            let sc = scope::resolve(&conn, None, &cwd())?;
+            let Some(s) = sessions::get_by_name(&conn, sc.id, &name)? else {
+                anyhow::bail!(
+                    "no session {name:?} in '{}' — `fuckmemory session list`",
+                    sc.label
+                );
+            };
+            let s = sessions::close(&conn, s.id)?;
+            println!(
+                "session '{}' closed — new prompts start a fresh one",
+                s.name
+            );
+            Ok(())
+        }
+    }
 }
 
 fn cmd_task(cfg: &Config, cmd: TaskCmd) -> Result<()> {

@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 /// Bumped whenever `MIGRATIONS` grows. Stored in `meta`.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Discriminator for the shared `vecs` table.
 pub const VEC_FACT: i64 = 1;
@@ -178,6 +178,34 @@ CREATE INDEX file_refs_path ON file_refs(path);
     // learned, so recall can answer "from what repository state".
     r#"
 ALTER TABLE episodes ADD COLUMN head TEXT;
+"#,
+    // ---- v3: work sessions ---------------------------------------------------
+    // A session groups the episodes of a stretch of work, across agents. The
+    // agent's own conversation id is stored per prompt in `episodes.meta`; here
+    // `members` is the set of "agent:conversation" keys that have written into
+    // this session, so a *different* agent's fresh conversation can be adopted
+    // (and handed the accumulated context) while a conversation already in the
+    // session just continues it. `name` is the human handle — `work-2026-08-26`
+    // by default, or whatever `session start <name>` said.
+    r#"
+CREATE TABLE sessions (
+    id            INTEGER PRIMARY KEY,
+    scope_id      INTEGER NOT NULL REFERENCES scopes(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    agent         TEXT NOT NULL DEFAULT '',
+    goal          TEXT,
+    status        TEXT NOT NULL DEFAULT 'open',
+    members       TEXT NOT NULL DEFAULT '[]',
+    episode_count INTEGER NOT NULL DEFAULT 0,
+    first_at      INTEGER NOT NULL,
+    last_at       INTEGER NOT NULL,
+    closed_at     INTEGER,
+    UNIQUE(scope_id, name)
+);
+CREATE INDEX sessions_scope_time ON sessions(scope_id, last_at DESC);
+
+ALTER TABLE episodes ADD COLUMN session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL;
+CREATE INDEX episodes_session ON episodes(session_id);
 "#,
 ];
 
@@ -416,7 +444,7 @@ mod tests {
         migrate(&conn).unwrap();
         assert_eq!(
             meta_get(&conn, "schema_version").unwrap().as_deref(),
-            Some("2")
+            Some("3")
         );
     }
 

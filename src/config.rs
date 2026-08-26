@@ -19,6 +19,10 @@ pub const DEFAULT_MODEL: &str = "minishlab/potion-retrieval-32M";
 
 pub const CONFIG_FILE: &str = "config.toml";
 
+/// How long a work session stays open without activity before a new prompt
+/// starts a new one. See [`crate::sessions`].
+pub const DEFAULT_SESSION_IDLE_HOURS: usize = 24;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Root for all state. `$FUCKMEMORY_HOME`, else `~/.local/share/fuckmemory`.
@@ -55,6 +59,13 @@ pub struct Config {
     pub autorecall: bool,
     pub autorecall_limit: usize,
     pub autorecall_budget: usize,
+    /// On the first prompt of a fresh conversation in a project whose work
+    /// session still holds activity, inject the accumulated session context —
+    /// the cross-agent handoff ("Claude yesterday, OpenCode today").
+    pub autorecall_session: bool,
+    /// How long a work session stays open without activity before a new prompt
+    /// starts a new one.
+    pub session_idle_hours: usize,
 
     /// Settings pinned by an environment variable, by config key. The TUI shows
     /// these as locked rather than letting you "change" something that a variable
@@ -79,6 +90,8 @@ impl Default for Config {
             autorecall: false,
             autorecall_limit: 6,
             autorecall_budget: 600,
+            autorecall_session: true,
+            session_idle_hours: DEFAULT_SESSION_IDLE_HOURS,
             env_locked: Vec::new(),
         }
     }
@@ -204,6 +217,14 @@ impl Config {
             if let Some(v) = t.get("budget_tokens").and_then(|v| v.as_integer()) {
                 self.autorecall_budget = v.max(0) as usize;
             }
+            if let Some(v) = t.get("session").and_then(|v| v.as_bool()) {
+                self.autorecall_session = v;
+            }
+        }
+        if let Some(t) = table("session") {
+            if let Some(v) = t.get("idle_hours").and_then(|v| v.as_integer()) {
+                self.session_idle_hours = v.max(1) as usize;
+            }
         }
         if let Some(t) = table("ignore") {
             if let Some(v) = t.get("paths").and_then(|v| v.as_array()) {
@@ -306,6 +327,15 @@ impl Config {
         doc["autorecall"]["enabled"] = toml_edit::value(self.autorecall);
         doc["autorecall"]["limit"] = toml_edit::value(self.autorecall_limit as i64);
         doc["autorecall"]["budget_tokens"] = toml_edit::value(self.autorecall_budget as i64);
+        doc["autorecall"]["session"] = toml_edit::value(self.autorecall_session);
+        if !doc
+            .get("session")
+            .map(|t| t.is_table_like())
+            .unwrap_or(false)
+        {
+            doc["session"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        doc["session"]["idle_hours"] = toml_edit::value(self.session_idle_hours as i64);
 
         if !self.ignore_paths.is_empty() {
             if !doc
@@ -425,6 +455,8 @@ mod tests {
         cfg.autorecall = true;
         cfg.autorecall_limit = 9;
         cfg.autorecall_budget = 777;
+        cfg.autorecall_session = false;
+        cfg.session_idle_hours = 7;
         cfg.budget_tokens = 2_000;
         cfg.semantic = false;
         cfg.fast = false;
@@ -444,6 +476,8 @@ mod tests {
         assert!(back.autorecall);
         assert_eq!(back.autorecall_limit, 9);
         assert_eq!(back.autorecall_budget, 777);
+        assert!(!back.autorecall_session);
+        assert_eq!(back.session_idle_hours, 7);
         assert_eq!(back.budget_tokens, 2_000);
         assert!(!back.semantic);
         assert!(!back.fast);

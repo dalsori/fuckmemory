@@ -197,6 +197,19 @@ pub fn run(
         let emb = embedder(cfg);
         let report = crate::consolidate::run(&mut conn, cfg, emb.as_ref(), 200)?;
         out.consolidated = report.episodes_processed;
+
+        // Best-effort: mark the conversation's work session as just active, so
+        // the idle clock starts from the real end of the session rather than the
+        // last prompt. Nothing here is allowed to fail the hook.
+        if let Some(sid) = meta.get("session_id").and_then(Value::as_str) {
+            if let Some(cid) = crate::sessions::conversation_key(agent, sid) {
+                if let Ok(sc) = scope::resolve(&conn, None, &cwd) {
+                    if let Ok(Some(s)) = crate::sessions::session_for_cid(&conn, sc.id, &cid) {
+                        let _ = crate::sessions::touch(&conn, s.id, crate::config::now());
+                    }
+                }
+            }
+        }
         return Ok(out);
     }
 
@@ -228,6 +241,31 @@ pub fn run(
         skip,
         Some("acknowledgement") | Some("slash command") | Some("shell passthrough") | Some("empty")
     );
+
+    // Work sessions: tag the prompt into the scope's session and, when a
+    // *different* agent's conversation picks up a session that already holds
+    // work, inject the accumulated context back — the cross-agent handoff that
+    // makes "continue in another agent" automatic. The session is tracked on
+    // every prompt (even skipped ones touch `last_at`), but the handoff render
+    // only fires once per conversation and only when the prompt deserves one.
+    let mut work_session: Option<crate::sessions::Session> = None;
+    let mut handoff_ctx: Option<String> = None;
+    if cfg.autosave {
+        let sid = meta.get("session_id").and_then(Value::as_str).unwrap_or("");
+        let (s, handoff, _new) =
+            crate::sessions::ensure(&conn, &sc, agent, sid, cfg.session_idle_hours)?;
+        if handoff && worth_recalling && cfg.autorecall_session {
+            handoff_ctx = crate::sessions::render_context(
+                &conn,
+                &s,
+                cfg.autorecall_budget.max(64),
+                &sc.label,
+            )?;
+        }
+        work_session = Some(s);
+    }
+
+    let mut recall_ctx: Option<String> = None;
     if cfg.autorecall && worth_recalling {
         let scope_ids = scope::read_set(&conn, &sc)?;
         // One-shot process: a persisted, mmap'd index keeps the SQLite read out
@@ -256,9 +294,18 @@ pub fn run(
         );
         if !rendered.trim().is_empty() {
             store::mark_hits(&conn, &pack::rendered_ids(&r, &rendered))?;
-            out.context = Some(rendered);
+            recall_ctx = Some(rendered);
         }
     }
+
+    // The session handoff comes first — it is "where the work is" — and the
+    // recalled memories follow as the prompt-specific answer.
+    out.context = match (handoff_ctx, recall_ctx) {
+        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
 
     if !cfg.autosave {
         out.skipped = Some("autosave is off");
@@ -293,7 +340,7 @@ pub fn run(
 
     let salient = cfg.autosave_facts && salience(&body).is_some();
     let kind = salience(&body).unwrap_or("prompt");
-    let session = meta.get("session_id").and_then(Value::as_str).unwrap_or("");
+    let agent_session = meta.get("session_id").and_then(Value::as_str).unwrap_or("");
 
     let stored = store::remember(
         &mut conn,
@@ -304,16 +351,26 @@ pub fn run(
             kind: kind.to_string(),
             source: format!("autosave:{agent}"),
             facts: vec![],
-            meta: Some(json!({ "session": session, "event": "prompt", "agent": agent })),
+            meta: Some(json!({
+                "session": agent_session,
+                "event": "prompt",
+                "agent": agent,
+            })),
             files: vec![],
             // Non-salient prompts stay episodes: kept and searchable, but never
             // ranked next to a real decision.
             derive: salient,
+            session_id: work_session.as_ref().map(|s| s.id),
         },
     )?;
     out.stored = true;
     out.duplicate = stored.duplicate;
     out.fact_ids = stored.fact_ids;
+    if !stored.duplicate {
+        if let Some(s) = work_session.as_ref() {
+            crate::sessions::bump_count(&conn, s.id)?;
+        }
+    }
     Ok(out)
 }
 

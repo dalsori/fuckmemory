@@ -89,6 +89,10 @@ pub struct RememberInput {
     /// deploy through fly.io".
     #[serde(default = "default_true")]
     pub derive: bool,
+    /// The work session this episode was learned in, when the hook knew one. The
+    /// session groups a project's activity across agents; see [`crate::sessions`].
+    #[serde(default)]
+    pub session_id: Option<i64>,
 }
 
 /// A file attached to a memory. `snippet` is written by the caller (usually the
@@ -338,8 +342,8 @@ pub fn remember(
         Some(id) => (id, true),
         None => {
             tx.execute(
-                "INSERT INTO episodes(scope_id, source, kind, body, meta, hash, recorded_at, head)
-                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO episodes(scope_id, source, kind, body, meta, hash, recorded_at, head, session_id)
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     scope.id,
                     input.source,
@@ -348,7 +352,8 @@ pub fn remember(
                     meta_s,
                     ep_hash,
                     ts,
-                    head
+                    head,
+                    input.session_id
                 ],
             )?;
             (tx.last_insert_rowid(), false)
@@ -1109,6 +1114,7 @@ mod tests {
             files: vec![],
             meta: None,
             derive: true,
+            session_id: None,
         }
     }
 
@@ -1190,6 +1196,7 @@ mod tests {
             files: vec![],
             meta: None,
             derive: true,
+            session_id: None,
         };
         remember(&mut conn, &sc, None, &f("npm")).unwrap();
         let out = remember(&mut conn, &sc, None, &f("pnpm")).unwrap();
@@ -1241,6 +1248,7 @@ mod tests {
                     files: vec![],
                     meta: None,
                     derive: true,
+                    session_id: None,
                 },
             )
             .unwrap();

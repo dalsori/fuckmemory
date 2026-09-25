@@ -26,6 +26,7 @@ pub struct BusMessage {
 }
 
 /// Send a message on the bus. Returns the inserted id.
+#[allow(clippy::too_many_arguments)]
 pub fn send(
     conn: &Connection,
     scope_id: i64,
@@ -91,7 +92,7 @@ pub fn list(
     let lim = (limit.clamp(1, 100)) as i64;
     // prune expired for reads too (cheap)
     let _ = prune_expired(conn, now());
-    let rows: Vec<BusMessage> = if let Some(ch) = channel.map(|c| normalize_channel(c)) {
+    let rows: Vec<BusMessage> = if let Some(ch) = channel.map(normalize_channel) {
         let mut st = conn.prepare(
             "SELECT id, scope_id, channel, from_agent, from_cid, to_agent, body, created_at, ttl_ms
              FROM bus_messages
@@ -125,7 +126,7 @@ pub fn poll(
     let lim = (limit.clamp(1, 100)) as i64;
     let _ = prune_expired(conn, now());
     let last_seen = cursor_get(conn, scope_id, agent)?;
-    let ch = channel.map(|c| normalize_channel(c));
+    let ch = channel.map(normalize_channel);
     let msgs: Vec<BusMessage> = if let Some(ch) = ch {
         let mut st = conn.prepare(
             "SELECT id, scope_id, channel, from_agent, from_cid, to_agent, body, created_at, ttl_ms
@@ -168,7 +169,7 @@ pub fn pending(
 ) -> Result<Vec<BusMessage>> {
     let lim = (limit.clamp(1, 100)) as i64;
     let last_seen = cursor_get(conn, scope_id, agent)?;
-    let ch = channel.map(|c| normalize_channel(c));
+    let ch = channel.map(normalize_channel);
     let now_ts = now();
     // filter expired in SQL via ttl_ms
     let msgs: Vec<BusMessage> = if let Some(ch) = ch {
@@ -551,7 +552,7 @@ mod tests {
     #[test]
     fn concurrent_sends_do_not_corrupt() {
         let conn = db::open_memory().unwrap();
-        let sc = scope::resolve(&conn, Some("/tmp/concurrent-bus"), Path::new("/")).unwrap();
+        let _sc = scope::resolve(&conn, Some("/tmp/concurrent-bus"), Path::new("/")).unwrap();
         // Use a file-backed DB for real concurrency
         let dir = std::env::temp_dir().join(format!(
             "fm-bus-conc-{}-{}",

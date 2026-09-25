@@ -2053,7 +2053,7 @@ fn cmd_plugin(cfg: &Config, cmd: PluginCmd) -> Result<()> {
                 );
                 return Ok(());
             }
-            println!("{:<20} {:<8} {:<12} {}", "NAME", "VERSION", "HOOKS", "PATH");
+            println!("{:<20} {:<8} {:<12} PATH", "NAME", "VERSION", "HOOKS");
             for p in plugs {
                 let hooks = if p.hooks.is_empty() {
                     "-".into()

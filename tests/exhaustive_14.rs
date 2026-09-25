@@ -79,7 +79,7 @@ fn bus_send_rejects_empty_and_too_long() {
 #[test]
 fn bus_channel_normalization_via_cli() {
     let home = scratch("bus-chan");
-    run(&home, &["bus", "send", "hello", "--channel", "My Channel!"]).0;
+    run(&home, &["bus", "send", "hello", "--channel", "My Channel!"]);
     let (out, _, ok) = run(&home, &["bus", "list", "--channel", "my-channel"]);
     assert!(ok);
     assert!(out.contains("hello"), "normalized channel not found: {out}");
@@ -243,13 +243,11 @@ fn hook_heartbeat_touch_even_for_skipped() {
     let proj = home.join("proj");
     let env = [("FUCKMEMORY_AUTOSAVE", "1")];
     let ack = payload(&proj, "ok", "sid-x");
-    hook(&home, &["hook", "prompt", "--agent", "tester"], &ack, &env);
-    // even ack should have created heartbeat
-    let (out, _, _) = run(&home, &["session", "list"]);
-    // session list may be empty (no session because ack is too short? but heartbeat should still exist)
-    // We check via direct DB? Instead we check session list still shows heartbeat footer even with no sessions
-    // For now just ensure hook succeeded
-    assert!(true);
+    let (_, _, ok) = hook(&home, &["hook", "prompt", "--agent", "tester"], &ack, &env);
+    assert!(ok, "hook should succeed even for ack");
+    // even ack should have created heartbeat — verify via session list still runs
+    let (_, _, ok2) = run(&home, &["session", "list"]);
+    assert!(ok2);
 }
 
 #[test]
@@ -343,7 +341,7 @@ fn mcp_bus_round_trip() {
     assert!(
         txt.contains("hello via mcp")
             || txt.contains("Inbox")
-            || txt.contains("empty") == false
+            || !txt.contains("empty")
             || txt.contains("mcp"),
         "bus_poll unexpected: {txt} {r2}"
     );

@@ -26,6 +26,7 @@ const Q: f32 = 127.0;
 /// Where the embeddings come from. Both backends produce the same vectors — the
 /// fast one is verified against the slow one before it is ever installed — so
 /// nothing downstream needs to know which is in use.
+#[allow(clippy::large_enum_variant)]
 enum Backend {
     /// The mmap'd cache: ~1 ms to open. See [`crate::fast`].
     Fast(Fast),

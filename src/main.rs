@@ -242,6 +242,29 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SessionCmd,
     },
+    /// Lightweight pub/sub between agents in the same project
+    Bus {
+        #[command(subcommand)]
+        cmd: BusCmd,
+    },
+    /// Alias for `bus poll` — unread messages for this agent
+    Inbox {
+        /// Channel to filter, defaults to all
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        scope: Option<String>,
+        /// Which agent's inbox to read (default: auto-detect)
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Plugins — extend fuckmemory with custom hooks (herdr-style marketplace)
+    Plugin {
+        #[command(subcommand)]
+        cmd: PluginCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -300,6 +323,66 @@ enum SessionCmd {
     /// Close a session so new prompts start a fresh one
     End {
         /// Session name, as shown by `session list`
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum BusCmd {
+    /// Send a message to other agents in this project
+    Send {
+        /// Message body
+        text: Vec<String>,
+        /// Deliver only to this agent (default: broadcast)
+        #[arg(long)]
+        to: Option<String>,
+        /// Channel name (default: general)
+        #[arg(long, default_value = "general")]
+        channel: String,
+        /// Expire after this many seconds
+        #[arg(long)]
+        ttl: Option<i64>,
+        /// Scope to send in
+        #[arg(long)]
+        scope: Option<String>,
+        /// Who is sending (default: auto-detect or opencode if CLI)
+        #[arg(long)]
+        from: Option<String>,
+    },
+    /// Poll unread messages for an agent (marks them seen)
+    Poll {
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// List recent messages (does not mark seen)
+    List {
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        scope: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PluginCmd {
+    /// List installed plugins
+    List,
+    /// Install a plugin from a git repo or local path
+    Install {
+        /// GitHub `owner/repo` or URL or local path
+        source: String,
+    },
+    /// Uninstall a plugin
+    Uninstall {
+        /// Plugin name as shown by `plugin list`
         name: String,
     },
 }
@@ -490,6 +573,14 @@ fn run() -> Result<()> {
         Cmd::Import { file, scope: s } => cmd_import(&cfg, file, s),
         Cmd::Task { cmd } => cmd_task(&cfg, cmd),
         Cmd::Session { cmd } => cmd_session(&cfg, cmd),
+        Cmd::Bus { cmd } => cmd_bus(&cfg, cmd),
+        Cmd::Inbox {
+            channel,
+            limit,
+            scope,
+            agent,
+        } => cmd_inbox(&cfg, channel, limit, scope, agent),
+        Cmd::Plugin { cmd } => cmd_plugin(&cfg, cmd),
     }
 }
 
@@ -1645,6 +1736,15 @@ fn cmd_session(cfg: &Config, cmd: SessionCmd) -> Result<()> {
             let all = sessions::list(&conn, sc.id)?;
             if all.is_empty() {
                 println!("no sessions yet in '{}'", sc.label);
+                // Still show heartbeats if any
+                let hbs = fuckmemory::heartbeat::list(&conn, sc.id).unwrap_or_default();
+                if !hbs.is_empty() {
+                    let ts = now();
+                    println!("\nheartbeats in '{}':", sc.label);
+                    for hb in hbs {
+                        println!("  {:<14} {:<7} {}", hb.agent, hb.status(ts), pack::ymd(hb.last_at));
+                    }
+                }
                 return Ok(());
             }
             let ts = now();
@@ -1670,6 +1770,15 @@ fn cmd_session(cfg: &Config, cmd: SessionCmd) -> Result<()> {
                     s.episode_count,
                     s.agents().join(",")
                 );
+            }
+            // Heartbeats footer — like herdr's sidebar
+            let hbs = fuckmemory::heartbeat::list(&conn, sc.id).unwrap_or_default();
+            if !hbs.is_empty() {
+                println!("\nagents (last seen):");
+                for hb in hbs {
+                    let dot = if hb.status(ts) == "working" { "●" } else { "○" };
+                    println!("  {} {:<14} {:<7} {}", dot, hb.agent, hb.status(ts), pack::ymd(hb.last_at));
+                }
             }
             Ok(())
         }
@@ -1767,4 +1876,253 @@ fn cmd_task(cfg: &Config, cmd: TaskCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn detect_agent() -> String {
+    for (var, name) in [
+        ("CLAUDECODE", "claude-code"),
+        ("CLAUDE_CODE_SSE_PORT", "claude-code"),
+        ("CODEX_SANDBOX", "codex"),
+        ("GEMINI_CLI", "gemini-cli"),
+        ("OPENCODE", "opencode"),
+        ("CURSOR_TRACE_ID", "cursor"),
+        ("QWEN_CODE", "qwen"),
+    ] {
+        if std::env::var_os(var).is_some() {
+            return name.to_string();
+        }
+    }
+    std::env::var("FUCKMEMORY_CLIENT").unwrap_or_else(|_| "cli".into())
+}
+
+fn cmd_bus(cfg: &Config, cmd: BusCmd) -> Result<()> {
+    match cmd {
+        BusCmd::Send {
+            text,
+            to,
+            channel,
+            ttl,
+            scope,
+            from,
+        } => {
+            let body = text.join(" ");
+            anyhow::ensure!(!body.trim().is_empty(), "nothing to send");
+            let conn = db::open(&cfg.db_path())?;
+            let sc = scope::resolve(&conn, scope.as_deref(), &cwd())?;
+            let from_agent = from.unwrap_or_else(detect_agent);
+            let ttl_ms = ttl.map(|s| s * 1000);
+            let id = fuckmemory::bus::send(
+                &conn,
+                sc.id,
+                &from_agent,
+                None,
+                to.as_deref(),
+                &channel,
+                &body,
+                ttl_ms,
+            )?;
+            if let Some(t) = to {
+                println!("sent #{id} on [{}] to {t} in '{}'", channel, sc.label);
+            } else {
+                println!("sent #{id} on [{}] (broadcast) in '{}'", channel, sc.label);
+            }
+            Ok(())
+        }
+        BusCmd::Poll {
+            channel,
+            limit,
+            scope,
+            agent,
+        } => {
+            let conn = db::open(&cfg.db_path())?;
+            let sc = scope::resolve(&conn, scope.as_deref(), &cwd())?;
+            let ag = agent.unwrap_or_else(detect_agent);
+            let msgs = fuckmemory::bus::poll(&conn, sc.id, &ag, channel.as_deref(), limit)?;
+            if msgs.is_empty() {
+                println!("inbox empty for {ag} in '{}'", sc.label);
+                return Ok(());
+            }
+            for m in &msgs {
+                let to = m
+                    .to_agent
+                    .as_deref()
+                    .map(|t| format!(" -> {t}"))
+                    .unwrap_or(" (broadcast)".to_string());
+                println!(
+                    "#{} [{}] {} ->{} @ {}: {}",
+                    m.id,
+                    m.channel,
+                    m.from_agent,
+                    to,
+                    pack::ymd(m.created_at),
+                    m.body
+                );
+            }
+            Ok(())
+        }
+        BusCmd::List {
+            channel,
+            limit,
+            scope,
+        } => {
+            let conn = db::open(&cfg.db_path())?;
+            let sc = scope::resolve(&conn, scope.as_deref(), &cwd())?;
+            let msgs = fuckmemory::bus::list(&conn, sc.id, channel.as_deref(), limit)?;
+            if msgs.is_empty() {
+                println!("no messages in '{}'", sc.label);
+                return Ok(());
+            }
+            for m in msgs.iter().rev() {
+                let to = m
+                    .to_agent
+                    .as_deref()
+                    .map(|t| format!(" -> {t}"))
+                    .unwrap_or(" (broadcast)".to_string());
+                println!(
+                    "#{} [{}] {} ->{} @ {}: {}",
+                    m.id,
+                    m.channel,
+                    m.from_agent,
+                    to,
+                    pack::ymd(m.created_at),
+                    m.body
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+fn cmd_inbox(
+    cfg: &Config,
+    channel: Option<String>,
+    limit: usize,
+    scope: Option<String>,
+    agent: Option<String>,
+) -> Result<()> {
+    let conn = db::open(&cfg.db_path())?;
+    let sc = scope::resolve(&conn, scope.as_deref(), &cwd())?;
+    let ag = agent.unwrap_or_else(detect_agent);
+    let msgs = fuckmemory::bus::poll(&conn, sc.id, &ag, channel.as_deref(), limit)?;
+    if msgs.is_empty() {
+        println!("inbox empty for {ag} in '{}'", sc.label);
+        return Ok(());
+    }
+    for m in &msgs {
+        let to = m
+            .to_agent
+            .as_deref()
+            .map(|t| format!(" -> {t}"))
+            .unwrap_or(" (broadcast)".to_string());
+        println!(
+            "#{} [{}] {} ->{} @ {}: {}",
+            m.id,
+            m.channel,
+            m.from_agent,
+            to,
+            pack::ymd(m.created_at),
+            m.body
+        );
+    }
+    Ok(())
+}
+
+fn cmd_plugin(cfg: &Config, cmd: PluginCmd) -> Result<()> {
+    match cmd {
+        PluginCmd::List => {
+            let plugs = fuckmemory::plugins::discover(cfg);
+            if plugs.is_empty() {
+                println!("no plugins installed (plugins live in {})", fuckmemory::plugins::plugins_dir(cfg).display());
+                return Ok(());
+            }
+            println!("{:<20} {:<8} {:<12} {}", "NAME", "VERSION", "HOOKS", "PATH");
+            for p in plugs {
+                let hooks = if p.hooks.is_empty() { "-".into() } else { p.hooks.join(",") };
+                let status = if p.valid { "" } else { " (invalid)" };
+                println!(
+                    "{:<20} {:<8} {:<12} {}{}",
+                    p.name,
+                    p.version,
+                    hooks,
+                    p.path.display(),
+                    status
+                );
+                if let Some(e) = p.error {
+                    println!("  ! {e}");
+                }
+                if !p.description.is_empty() {
+                    println!("    {}", p.description);
+                }
+            }
+            Ok(())
+        }
+        PluginCmd::Install { source } => {
+            let dir = fuckmemory::plugins::plugins_dir(cfg);
+            std::fs::create_dir_all(&dir)?;
+            // For 1.4.0, local path copies are supported; github clone is best-effort.
+            let src_path = PathBuf::from(&source);
+            if src_path.exists() {
+                let name = src_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let dest = dir.join(&name);
+                if dest.exists() {
+                    anyhow::bail!("plugin {name:?} already exists at {}", dest.display());
+                }
+                // Simple copy dir
+                copy_dir_recursive(&src_path, &dest)?;
+                println!("installed {name} from {} to {}", source, dest.display());
+                return Ok(());
+            }
+            // Try git clone for github shorthand or URL
+            let url = if source.contains("://") {
+                source.clone()
+            } else if source.contains('/') {
+                format!("https://github.com/{source}.git")
+            } else {
+                anyhow::bail!("source must be a local path or github owner/repo or URL");
+            };
+            let name = url
+                .rsplit('/')
+                .next()
+                .unwrap_or("plugin")
+                .trim_end_matches(".git")
+                .to_string();
+            let dest = dir.join(&name);
+            if dest.exists() {
+                anyhow::bail!("plugin {name:?} already exists at {}", dest.display());
+            }
+            let out = std::process::Command::new("git")
+                .args(["clone", &url, dest.to_str().unwrap()])
+                .output()
+                .context("running git clone — is git installed?")?;
+            if !out.status.success() {
+                anyhow::bail!("git clone failed: {}", String::from_utf8_lossy(&out.stderr));
+            }
+            println!("installed {name} from {url} to {}", dest.display());
+            Ok(())
+        }
+        PluginCmd::Uninstall { name } => {
+            let dest = fuckmemory::plugins::plugins_dir(cfg).join(&name);
+            if !dest.exists() {
+                anyhow::bail!("no plugin {name:?} at {}", dest.display());
+            }
+            std::fs::remove_dir_all(&dest)?;
+            println!("uninstalled {name}");
+            Ok(())
+        }
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let to = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), to)?;
+        }
+    }
+    Ok(())
 }

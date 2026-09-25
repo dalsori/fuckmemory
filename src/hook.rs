@@ -248,6 +248,13 @@ pub fn run(
     // makes "continue in another agent" automatic. The session is tracked on
     // every prompt (even skipped ones touch `last_at`), but the handoff render
     // only fires once per conversation and only when the prompt deserves one.
+    // Heartbeat: record that this agent was seen in this scope right now,
+    // even for skipped/short prompts. Best-effort, never fails the hook.
+    {
+        let sid = meta.get("session_id").and_then(Value::as_str);
+        let _ = crate::heartbeat::touch(&conn, sc.id, agent, sid);
+    }
+
     let mut work_session: Option<crate::sessions::Session> = None;
     let mut handoff_ctx: Option<String> = None;
     if cfg.autosave {
@@ -298,13 +305,27 @@ pub fn run(
         }
     }
 
-    // The session handoff comes first — it is "where the work is" — and the
-    // recalled memories follow as the prompt-specific answer.
-    out.context = match (handoff_ctx, recall_ctx) {
-        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
+    // Inbox: unread bus messages for this agent in this scope. Fetched via
+    // poll so they are marked seen once injected — next prompt won't repeat.
+    let inbox_ctx: Option<String> = if worth_recalling {
+        let pending = crate::bus::poll(&conn, sc.id, agent, None, 5).unwrap_or_default();
+        // poll already advanced the cursor; render with a small budget so it
+        // never eats the recall window. Use 400 tokens max for inbox.
+        crate::bus::render_inbox(&pending, 400)
+    } else {
+        None
+    };
+
+    // Order: handoff (where the work is) -> inbox (what others told you) -> recall (what you asked).
+    out.context = match (handoff_ctx, inbox_ctx, recall_ctx) {
+        (Some(a), Some(b), Some(c)) => Some(format!("{a}\n\n{b}\n\n{c}")),
+        (Some(a), Some(b), None) => Some(format!("{a}\n\n{b}")),
+        (Some(a), None, Some(c)) => Some(format!("{a}\n\n{c}")),
+        (None, Some(b), Some(c)) => Some(format!("{b}\n\n{c}")),
+        (Some(a), None, None) => Some(a),
+        (None, Some(b), None) => Some(b),
+        (None, None, Some(c)) => Some(c),
+        (None, None, None) => None,
     };
 
     if !cfg.autosave {
@@ -340,6 +361,13 @@ pub fn run(
 
     let salient = cfg.autosave_facts && salience(&body).is_some();
     let kind = salience(&body).unwrap_or("prompt");
+    // Plugin hook: allow installed plugins to transform the prompt before storage.
+    // Best-effort, never fails the hook. Timeout 200ms per plugin.
+    body = crate::plugins::apply_on_store(cfg, body, kind, &format!("autosave:{agent}"));
+    if body.trim().is_empty() {
+        out.skipped = Some("nothing left after plugin");
+        return Ok(out);
+    }
     let agent_session = meta.get("session_id").and_then(Value::as_str).unwrap_or("");
 
     let stored = store::remember(

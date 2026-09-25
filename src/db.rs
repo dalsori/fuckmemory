@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 /// Bumped whenever `MIGRATIONS` grows. Stored in `meta`.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Discriminator for the shared `vecs` table.
 pub const VEC_FACT: i64 = 1;
@@ -206,6 +206,41 @@ CREATE INDEX sessions_scope_time ON sessions(scope_id, last_at DESC);
 
 ALTER TABLE episodes ADD COLUMN session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL;
 CREATE INDEX episodes_session ON episodes(session_id);
+"#,
+     // ---- v4: bus / inbox ----------------------------------------------------
+     // Lightweight pub/sub between agents, scoped per project. `to_agent` NULL
+     // means broadcast to everyone in the scope. `bus_cursors` tracks the last
+     // message each agent has seen so `hook` can inject only unread messages.
+     r#"
+CREATE TABLE bus_messages (
+    id          INTEGER PRIMARY KEY,
+    scope_id    INTEGER NOT NULL REFERENCES scopes(id) ON DELETE CASCADE,
+    channel     TEXT NOT NULL DEFAULT 'general',
+    from_agent  TEXT NOT NULL,
+    from_cid    TEXT,
+    to_agent    TEXT,
+    body        TEXT NOT NULL,
+    created_at  INTEGER NOT NULL,
+    ttl_ms      INTEGER
+);
+CREATE INDEX bus_scope_channel ON bus_messages(scope_id, channel, created_at DESC);
+CREATE INDEX bus_scope_to ON bus_messages(scope_id, to_agent, created_at DESC);
+
+CREATE TABLE bus_cursors (
+    scope_id     INTEGER NOT NULL REFERENCES scopes(id) ON DELETE CASCADE,
+    agent        TEXT NOT NULL,
+    last_seen_id INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(scope_id, agent)
+) WITHOUT ROWID;
+
+-- Heartbeats: last time each agent was seen in each scope, for status detection.
+CREATE TABLE heartbeats (
+    scope_id INTEGER NOT NULL REFERENCES scopes(id) ON DELETE CASCADE,
+    agent    TEXT NOT NULL,
+    last_at  INTEGER NOT NULL,
+    last_cid TEXT,
+    PRIMARY KEY(scope_id, agent)
+) WITHOUT ROWID;
 "#,
 ];
 
@@ -444,7 +479,7 @@ mod tests {
         migrate(&conn).unwrap();
         assert_eq!(
             meta_get(&conn, "schema_version").unwrap().as_deref(),
-            Some("3")
+            Some("4")
         );
     }
 

@@ -172,6 +172,33 @@ impl Server {
                     },
                     "required": ["entity"]
                 }
+            },
+            {
+                "name": "bus_send",
+                "description": "Send a message to other agents in this project via the local bus. Broadcast by default; use to_agent to target one agent. The message appears in the recipient's inbox on their next prompt (hook injection) or via bus_poll.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "body": { "type": "string", "description": "Message body (max 4000 chars)." },
+                        "channel": { "type": "string", "description": "Channel name, default 'general'." },
+                        "to_agent": { "type": "string", "description": "Target agent id (e.g. 'codex', 'claude-code'). Omit for broadcast." },
+                        "ttl_seconds": { "type": "integer", "description": "Expire after this many seconds." },
+                        "scope": { "type": "string" }
+                    },
+                    "required": ["body"]
+                }
+            },
+            {
+                "name": "bus_poll",
+                "description": "Poll unread bus messages for this agent. Marks them seen. Broadcast messages and those directed to you are returned.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "description": "Max messages to return. Default 20." },
+                        "channel": { "type": "string", "description": "Filter by channel." },
+                        "scope": { "type": "string" }
+                    }
+                }
             }
         ])
     }
@@ -237,6 +264,8 @@ impl Server {
             "remember" => self.tool_remember(args),
             "forget" => self.tool_forget(args),
             "timeline" => self.tool_timeline(args),
+            "bus_send" => self.tool_bus_send(args),
+            "bus_poll" => self.tool_bus_poll(args),
             other => anyhow::bail!("unknown tool: {other}"),
         }
     }
@@ -461,6 +490,68 @@ impl Server {
         }
         Ok(out)
     }
+
+    fn tool_bus_send(&mut self, args: &Value) -> Result<String> {
+        let body = args
+            .get("body")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("body is required"))?;
+        anyhow::ensure!(!body.trim().is_empty(), "body cannot be empty");
+        let sc = self.scope_of(args)?;
+        let channel = args.get("channel").and_then(Value::as_str).unwrap_or("general");
+        let to_agent = args.get("to_agent").and_then(Value::as_str);
+        let ttl_ms = args
+            .get("ttl_seconds")
+            .and_then(Value::as_i64)
+            .map(|s| s * 1000);
+        let from_agent = client_name();
+        let id = crate::bus::send(
+            &self.conn,
+            sc.id,
+            &from_agent,
+            None,
+            to_agent,
+            channel,
+            body,
+            ttl_ms,
+        )?;
+        Ok(format!(
+            "sent #{id} on [{}] to {} in '{}'",
+            channel,
+            to_agent.unwrap_or("broadcast"),
+            sc.label
+        ))
+    }
+
+    fn tool_bus_poll(&mut self, args: &Value) -> Result<String> {
+        let sc = self.scope_of(args)?;
+        let channel = args.get("channel").and_then(Value::as_str);
+        let limit = uint(args, "limit").unwrap_or(20).clamp(1, 100);
+        let agent = client_name();
+        // When called via MCP, the agent is the caller itself.
+        let msgs = crate::bus::poll(&self.conn, sc.id, &agent, channel, limit)?;
+        if msgs.is_empty() {
+            return Ok(format!("inbox empty for {agent} in '{}'", sc.label));
+        }
+        let mut out = format!("## Inbox — {} message(s) for {agent}\n", msgs.len());
+        for m in msgs {
+            let to = m
+                .to_agent
+                .as_deref()
+                .map(|t| format!(" -> {t}"))
+                .unwrap_or(" (broadcast)".to_string());
+            out.push_str(&format!(
+                "- #{} [{}] {}{} @ {}: {}\n",
+                m.id,
+                m.channel,
+                m.from_agent,
+                to,
+                pack::ymd(m.created_at),
+                m.body
+            ));
+        }
+        Ok(out)
+    }
 }
 
 fn uint(args: &Value, key: &str) -> Option<usize> {
@@ -596,7 +687,7 @@ mod tests {
         let mut s = test_server();
         let r = s.handle(&req(1, "tools/list", json!({}))).unwrap();
         let tools = r["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 6);
         for t in tools {
             assert!(t["name"].is_string());
             assert!(t["description"].as_str().unwrap().len() > 40);

@@ -61,6 +61,9 @@ one-glance summary; the docs are the detail.
   a *different* agent's conversation starts in that project, the first prompt
   is handed the accumulated context (goal, decisions, files, task) — so you can
   work in Claude Code and pick up in OpenCode with no ritual.
+- **Agent bus & inbox.** `fuckmemory bus send "review the deploy" --to codex` and `bus poll` / `inbox` give agents an active channel — broadcast or directed, scoped per project. Unread messages are injected on the next prompt, so agents can nudge each other without polling.
+- **Live herd status.** Every prompt touches a per-agent heartbeat; `session list` shows `● working / ○ idle` (herdr-style) so you know who is still working.
+- **Plugin skeleton.** `fuckmemory plugin list|install|uninstall` discovers `plugins/<name>/plugin.toml` (`command`, `hooks = ["on_store"]`) and runs `on_store` transforms (200 ms timeout, never breaks the hook). Foundation for custom retrievers/redactors.
 - **Owned by you.** One database, one model, one config directory; `uninstall`
   reverses every byte `install` wrote.
 
@@ -100,6 +103,9 @@ fuckmemory timeline fly.io                            # history of an entity
 fuckmemory explain "deploy"                           # why this ranking?
 fuckmemory task status                                # resume interrupted work
 fuckmemory session list                               # what a project has been doing
+fuckmemory bus send "review the deploy" --to codex    # nudge another agent
+fuckmemory inbox                                      # unread messages for you
+fuckmemory plugin list                                # herdr-style plugins
 ```
 
 ## Autosave

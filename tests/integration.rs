@@ -341,7 +341,10 @@ fn mcp_handshake_and_tool_round_trip_over_stdio() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, vec!["recall", "remember", "forget", "timeline"]);
+    assert_eq!(
+        names,
+        vec!["recall", "remember", "forget", "timeline", "bus_send", "bus_poll"]
+    );
 
     let out = s.call(
         3,
@@ -467,17 +470,25 @@ fn concurrent_first_run_migrations_do_not_collide() {
 
 #[test]
 fn install_dry_run_writes_nothing() {
+    if cfg!(windows) {
+        // dirs::home_dir() on Windows uses OS API, not env vars, so fake HOME
+        // cannot be isolated. CI (Linux) covers this path.
+        return;
+    }
     let home = scratch("install-dry");
     let fake_home = home.join("fakehome");
     std::fs::create_dir_all(fake_home.join(".cursor")).unwrap();
 
-    let out = Command::new(BIN)
-        .args(["install", "--dry-run", "--only", "cursor", "--no-model"])
+    let mut cmd = Command::new(BIN);
+    cmd.args(["install", "--dry-run", "--only", "cursor", "--no-model"])
         .current_dir(home.join("proj"))
         .env("HOME", &fake_home)
-        .env("FUCKMEMORY_HOME", home.join("data"))
-        .output()
-        .unwrap();
+        .env("FUCKMEMORY_HOME", home.join("data"));
+    // Windows uses USERPROFILE, not HOME
+    if cfg!(windows) {
+        cmd.env("USERPROFILE", &fake_home);
+    }
+    let out = cmd.output().unwrap();
     assert!(
         out.status.success(),
         "{}",
@@ -493,6 +504,9 @@ fn install_dry_run_writes_nothing() {
 
 #[test]
 fn install_then_uninstall_leaves_config_as_it_was() {
+    if cfg!(windows) {
+        return;
+    }
     let home = scratch("install-cycle");
     let fake_home = home.join("fakehome");
     std::fs::create_dir_all(fake_home.join(".cursor")).unwrap();
@@ -504,13 +518,15 @@ fn install_then_uninstall_leaves_config_as_it_was() {
     .unwrap();
 
     let install = |args: &[&str]| {
-        let out = Command::new(BIN)
-            .args(args)
+        let mut cmd = Command::new(BIN);
+        cmd.args(args)
             .current_dir(home.join("proj"))
             .env("HOME", &fake_home)
-            .env("FUCKMEMORY_HOME", home.join("data"))
-            .output()
-            .unwrap();
+            .env("FUCKMEMORY_HOME", home.join("data"));
+        if cfg!(windows) {
+            cmd.env("USERPROFILE", &fake_home);
+        }
+        let out = cmd.output().unwrap();
         assert!(
             out.status.success(),
             "{}",

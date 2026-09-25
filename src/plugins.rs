@@ -70,7 +70,11 @@ pub fn discover(cfg: &Config) -> Vec<Plugin> {
                 match parse_json_manifest(&json_path, &path) {
                     Ok(p) => out.push(p),
                     Err(e) => out.push(Plugin {
-                        name: path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                        name: path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string(),
                         version: "0.0.0".into(),
                         description: String::new(),
                         command: None,
@@ -86,7 +90,11 @@ pub fn discover(cfg: &Config) -> Vec<Plugin> {
         match parse_manifest(&manifest_path, &path) {
             Ok(p) => out.push(p),
             Err(e) => out.push(Plugin {
-                name: path.file_name().unwrap_or_default().to_string_lossy().to_string(),
+                name: path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string(),
                 version: "0.0.0".into(),
                 description: String::new(),
                 command: None,
@@ -102,8 +110,10 @@ pub fn discover(cfg: &Config) -> Vec<Plugin> {
 }
 
 fn parse_manifest(path: &Path, dir: &Path) -> Result<Plugin> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let manifest: Manifest = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let manifest: Manifest =
+        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
     let name = manifest.plugin.name.trim().to_string();
     anyhow::ensure!(!name.is_empty(), "plugin.name cannot be empty");
     Ok(Plugin {
@@ -139,11 +149,18 @@ fn parse_json_manifest(path: &Path, dir: &Path) -> Result<Plugin> {
             .and_then(|s| s.as_str())
             .unwrap_or("")
             .to_string(),
-        command: obj.get("command").and_then(|s| s.as_str()).map(|s| s.to_string()),
+        command: obj
+            .get("command")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string()),
         hooks: obj
             .get("hooks")
             .and_then(|s| s.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default(),
         path: dir.to_path_buf(),
         valid: true,
@@ -158,14 +175,12 @@ fn parse_json_manifest(path: &Path, dir: &Path) -> Result<Plugin> {
 /// ignored — a plugin must never break the hook.
 ///
 /// Timeout: 200ms per plugin, as in the spec.
-pub fn apply_on_store(
-    cfg: &Config,
-    mut text: String,
-    kind: &str,
-    source: &str,
-) -> String {
+pub fn apply_on_store(cfg: &Config, mut text: String, kind: &str, source: &str) -> String {
     let plugins = discover(cfg);
-    for p in plugins.iter().filter(|pl| pl.valid && pl.hooks.iter().any(|h| h == "on_store")) {
+    for p in plugins
+        .iter()
+        .filter(|pl| pl.valid && pl.hooks.iter().any(|h| h == "on_store"))
+    {
         let Some(cmd) = p.command.as_deref() else {
             continue;
         };
@@ -180,7 +195,13 @@ pub fn apply_on_store(
     text
 }
 
-fn run_plugin(dir: &Path, cmd: &str, text: &str, kind: &str, source: &str) -> Result<Option<String>> {
+fn run_plugin(
+    dir: &Path,
+    cmd: &str,
+    text: &str,
+    kind: &str,
+    source: &str,
+) -> Result<Option<String>> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     use std::time::Duration;
@@ -233,11 +254,15 @@ fn run_plugin(dir: &Path, cmd: &str, text: &str, kind: &str, source: &str) -> Re
                 if out.is_empty() {
                     return Ok(None);
                 }
-                let v: serde_json::Value = serde_json::from_str(out).context("plugin output not JSON")?;
+                let v: serde_json::Value =
+                    serde_json::from_str(out).context("plugin output not JSON")?;
                 if v.get("drop").and_then(|d| d.as_bool()).unwrap_or(false) {
                     // dropping means the caller should skip storage; we signal by returning empty marker
                     // For 1.4.0, drop is not yet honored at call site — we just return None and log.
-                    eprintln!("fuckmemory: plugin {} requested drop (ignored in 1.4.0)", dir.display());
+                    eprintln!(
+                        "fuckmemory: plugin {} requested drop (ignored in 1.4.0)",
+                        dir.display()
+                    );
                     return Ok(None);
                 }
                 if let Some(t) = v.get("text").and_then(|s| s.as_str()) {
@@ -357,7 +382,11 @@ hooks = ["on_store"]
         for name in ["zebra", "apple", "middle"] {
             let d = plugins_dir(&cfg).join(name);
             fs::create_dir_all(&d).unwrap();
-            fs::write(d.join("plugin.toml"), format!("[plugin]\nname = \"{name}\"\n")).unwrap();
+            fs::write(
+                d.join("plugin.toml"),
+                format!("[plugin]\nname = \"{name}\"\n"),
+            )
+            .unwrap();
         }
         let plugs = discover(&cfg);
         assert_eq!(plugs[0].name, "apple");
@@ -392,12 +421,14 @@ hooks = ["on_store"]
         fs::create_dir_all(&plug_dir).unwrap();
         // Create a file with the JSON payload and cat/type it — more portable than echo quoting
         fs::write(plug_dir.join("out.json"), r#"{"text":"TRANSFORMED"}"#).unwrap();
-        let cmd = if cfg!(windows) { "type out.json" } else { "cat out.json" };
+        let cmd = if cfg!(windows) {
+            "type out.json"
+        } else {
+            "cat out.json"
+        };
         fs::write(
             plug_dir.join("plugin.toml"),
-            format!(
-                "[plugin]\nname = \"xform\"\ncommand = \"{cmd}\"\nhooks = [\"on_store\"]\n"
-            ),
+            format!("[plugin]\nname = \"xform\"\ncommand = \"{cmd}\"\nhooks = [\"on_store\"]\n"),
         )
         .unwrap();
         let out = apply_on_store(&cfg, "hello".into(), "note", "cli");
@@ -414,7 +445,9 @@ hooks = ["on_store"]
         let cmd = if cfg!(windows) { "exit 1" } else { "false" };
         fs::write(
             plug_dir.join("plugin.toml"),
-            format!("[plugin]\nname = \"fail-plug\"\ncommand = \"{cmd}\"\nhooks = [\"on_store\"]\n"),
+            format!(
+                "[plugin]\nname = \"fail-plug\"\ncommand = \"{cmd}\"\nhooks = [\"on_store\"]\n"
+            ),
         )
         .unwrap();
         let out = apply_on_store(&cfg, "hello".into(), "note", "cli");
@@ -435,13 +468,18 @@ hooks = ["on_store"]
         };
         fs::write(
             plug_dir.join("plugin.toml"),
-            format!("[plugin]\nname = \"slow-plug\"\ncommand = \"{cmd}\"\nhooks = [\"on_store\"]\n"),
+            format!(
+                "[plugin]\nname = \"slow-plug\"\ncommand = \"{cmd}\"\nhooks = [\"on_store\"]\n"
+            ),
         )
         .unwrap();
         let start = std::time::Instant::now();
         let out = apply_on_store(&cfg, "hello".into(), "note", "cli");
         assert_eq!(out, "hello");
-        assert!(start.elapsed() < std::time::Duration::from_millis(600), "should not wait 1s, should timeout at 200ms");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(600),
+            "should not wait 1s, should timeout at 200ms"
+        );
         fs::remove_dir_all(&cfg.home).ok();
     }
 }

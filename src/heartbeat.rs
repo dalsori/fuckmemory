@@ -121,7 +121,11 @@ mod tests {
             last_at: now_ts - WORKING_WINDOW_MS,
             last_cid: None,
         };
-        assert_eq!(hb.status(now_ts), "working", "exact boundary should be working");
+        assert_eq!(
+            hb.status(now_ts),
+            "working",
+            "exact boundary should be working"
+        );
         let hb2 = Heartbeat {
             scope_id: 1,
             agent: "x".into(),

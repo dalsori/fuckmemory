@@ -207,11 +207,11 @@ CREATE INDEX sessions_scope_time ON sessions(scope_id, last_at DESC);
 ALTER TABLE episodes ADD COLUMN session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL;
 CREATE INDEX episodes_session ON episodes(session_id);
 "#,
-     // ---- v4: bus / inbox ----------------------------------------------------
-     // Lightweight pub/sub between agents, scoped per project. `to_agent` NULL
-     // means broadcast to everyone in the scope. `bus_cursors` tracks the last
-     // message each agent has seen so `hook` can inject only unread messages.
-     r#"
+    // ---- v4: bus / inbox ----------------------------------------------------
+    // Lightweight pub/sub between agents, scoped per project. `to_agent` NULL
+    // means broadcast to everyone in the scope. `bus_cursors` tracks the last
+    // message each agent has seen so `hook` can inject only unread messages.
+    r#"
 CREATE TABLE bus_messages (
     id          INTEGER PRIMARY KEY,
     scope_id    INTEGER NOT NULL REFERENCES scopes(id) ON DELETE CASCADE,

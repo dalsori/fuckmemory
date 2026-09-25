@@ -498,7 +498,10 @@ impl Server {
             .ok_or_else(|| anyhow::anyhow!("body is required"))?;
         anyhow::ensure!(!body.trim().is_empty(), "body cannot be empty");
         let sc = self.scope_of(args)?;
-        let channel = args.get("channel").and_then(Value::as_str).unwrap_or("general");
+        let channel = args
+            .get("channel")
+            .and_then(Value::as_str)
+            .unwrap_or("general");
         let to_agent = args.get("to_agent").and_then(Value::as_str);
         let ttl_ms = args
             .get("ttl_seconds")

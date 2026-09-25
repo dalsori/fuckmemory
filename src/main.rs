@@ -1742,7 +1742,12 @@ fn cmd_session(cfg: &Config, cmd: SessionCmd) -> Result<()> {
                     let ts = now();
                     println!("\nheartbeats in '{}':", sc.label);
                     for hb in hbs {
-                        println!("  {:<14} {:<7} {}", hb.agent, hb.status(ts), pack::ymd(hb.last_at));
+                        println!(
+                            "  {:<14} {:<7} {}",
+                            hb.agent,
+                            hb.status(ts),
+                            pack::ymd(hb.last_at)
+                        );
                     }
                 }
                 return Ok(());
@@ -1776,8 +1781,18 @@ fn cmd_session(cfg: &Config, cmd: SessionCmd) -> Result<()> {
             if !hbs.is_empty() {
                 println!("\nagents (last seen):");
                 for hb in hbs {
-                    let dot = if hb.status(ts) == "working" { "●" } else { "○" };
-                    println!("  {} {:<14} {:<7} {}", dot, hb.agent, hb.status(ts), pack::ymd(hb.last_at));
+                    let dot = if hb.status(ts) == "working" {
+                        "●"
+                    } else {
+                        "○"
+                    };
+                    println!(
+                        "  {} {:<14} {:<7} {}",
+                        dot,
+                        hb.agent,
+                        hb.status(ts),
+                        pack::ymd(hb.last_at)
+                    );
                 }
             }
             Ok(())
@@ -2032,12 +2047,19 @@ fn cmd_plugin(cfg: &Config, cmd: PluginCmd) -> Result<()> {
         PluginCmd::List => {
             let plugs = fuckmemory::plugins::discover(cfg);
             if plugs.is_empty() {
-                println!("no plugins installed (plugins live in {})", fuckmemory::plugins::plugins_dir(cfg).display());
+                println!(
+                    "no plugins installed (plugins live in {})",
+                    fuckmemory::plugins::plugins_dir(cfg).display()
+                );
                 return Ok(());
             }
             println!("{:<20} {:<8} {:<12} {}", "NAME", "VERSION", "HOOKS", "PATH");
             for p in plugs {
-                let hooks = if p.hooks.is_empty() { "-".into() } else { p.hooks.join(",") };
+                let hooks = if p.hooks.is_empty() {
+                    "-".into()
+                } else {
+                    p.hooks.join(",")
+                };
                 let status = if p.valid { "" } else { " (invalid)" };
                 println!(
                     "{:<20} {:<8} {:<12} {}{}",
@@ -2062,7 +2084,11 @@ fn cmd_plugin(cfg: &Config, cmd: PluginCmd) -> Result<()> {
             // For 1.4.0, local path copies are supported; github clone is best-effort.
             let src_path = PathBuf::from(&source);
             if src_path.exists() {
-                let name = src_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let name = src_path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 let dest = dir.join(&name);
                 if dest.exists() {
                     anyhow::bail!("plugin {name:?} already exists at {}", dest.display());

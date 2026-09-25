@@ -16,20 +16,20 @@
 //! - [`install`]   detects installed agents and wires itself into each one
 //! - [`update`]    `fuckmemory update` — fetch the latest release and replace this binary
 
+pub mod bus;
 pub mod config;
 pub mod consolidate;
 pub mod db;
 pub mod embed;
 pub mod fast;
 pub mod graph;
+pub mod heartbeat;
 pub mod hook;
 pub mod install;
 pub mod mcp;
 pub mod pack;
-pub mod retrieve;
-pub mod bus;
-pub mod heartbeat;
 pub mod plugins;
+pub mod retrieve;
 pub mod scope;
 pub mod sessions;
 pub mod store;

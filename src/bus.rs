@@ -39,7 +39,10 @@ pub fn send(
     let ch = normalize_channel(channel);
     let body = body.trim();
     anyhow::ensure!(!body.is_empty(), "bus message cannot be empty");
-    anyhow::ensure!(body.chars().count() <= 4000, "bus message too long (max 4000 chars)");
+    anyhow::ensure!(
+        body.chars().count() <= 4000,
+        "bus message too long (max 4000 chars)"
+    );
     anyhow::ensure!(!from_agent.trim().is_empty(), "from_agent required");
     let ts = now();
     // Best-effort expiry of old TTL messages before inserting (cheap, runs per send).
@@ -59,7 +62,13 @@ fn normalize_channel(s: &str) -> String {
     }
     out = out
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     while out.contains("--") {
         out = out.replace("--", "-");
@@ -171,7 +180,10 @@ pub fn pending(
                AND (ttl_ms IS NULL OR created_at + ttl_ms > ?5)
              ORDER BY id ASC LIMIT ?6",
         )?;
-        let iter = st.query_map(params![scope_id, last_seen, ch, agent, now_ts, lim], row_bus)?;
+        let iter = st.query_map(
+            params![scope_id, last_seen, ch, agent, now_ts, lim],
+            row_bus,
+        )?;
         iter.collect::<rusqlite::Result<Vec<_>>>()?
     } else {
         let mut st = conn.prepare(
@@ -269,9 +281,20 @@ pub fn render_inbox(msgs: &[BusMessage], budget_tokens: usize) -> Option<String>
         );
         // Alternative compact line
         let line2 = if m.to_agent.is_some() {
-            format!("- [{}] {} -> {}: {}\n", m.channel, m.from_agent, m.to_agent.as_deref().unwrap_or(""), truncate(&m.body, 300))
+            format!(
+                "- [{}] {} -> {}: {}\n",
+                m.channel,
+                m.from_agent,
+                m.to_agent.as_deref().unwrap_or(""),
+                truncate(&m.body, 300)
+            )
         } else {
-            format!("- [{}] {} (broadcast): {}\n", m.channel, m.from_agent, truncate(&m.body, 300))
+            format!(
+                "- [{}] {} (broadcast): {}\n",
+                m.channel,
+                m.from_agent,
+                truncate(&m.body, 300)
+            )
         };
         let _ = to; // suppress unused
         let cost = pack::est_tokens(&line2);
@@ -314,8 +337,28 @@ mod tests {
     #[test]
     fn send_and_list() {
         let (conn, sc) = setup();
-        send(&conn, sc.id, "claude-code", None, None, "general", "hello", None).unwrap();
-        send(&conn, sc.id, "opencode", None, Some("claude-code"), "ops", "hi claude", None).unwrap();
+        send(
+            &conn,
+            sc.id,
+            "claude-code",
+            None,
+            None,
+            "general",
+            "hello",
+            None,
+        )
+        .unwrap();
+        send(
+            &conn,
+            sc.id,
+            "opencode",
+            None,
+            Some("claude-code"),
+            "ops",
+            "hi claude",
+            None,
+        )
+        .unwrap();
         let all = list(&conn, sc.id, None, 10).unwrap();
         assert_eq!(all.len(), 2);
         let ops = list(&conn, sc.id, Some("ops"), 10).unwrap();
@@ -326,8 +369,28 @@ mod tests {
     #[test]
     fn poll_delivers_broadcast_and_directed() {
         let (conn, sc) = setup();
-        send(&conn, sc.id, "claude-code", None, None, "general", "broadcast", None).unwrap();
-        send(&conn, sc.id, "claude-code", None, Some("opencode"), "general", "private", None).unwrap();
+        send(
+            &conn,
+            sc.id,
+            "claude-code",
+            None,
+            None,
+            "general",
+            "broadcast",
+            None,
+        )
+        .unwrap();
+        send(
+            &conn,
+            sc.id,
+            "claude-code",
+            None,
+            Some("opencode"),
+            "general",
+            "private",
+            None,
+        )
+        .unwrap();
         // opencode sees both
         let msgs = poll(&conn, sc.id, "opencode", None, 10).unwrap();
         assert_eq!(msgs.len(), 2);
@@ -343,7 +406,17 @@ mod tests {
     #[test]
     fn ttl_expires() {
         let (conn, sc) = setup();
-        send(&conn, sc.id, "a", None, None, "general", "short lived", Some(1)).unwrap();
+        send(
+            &conn,
+            sc.id,
+            "a",
+            None,
+            None,
+            "general",
+            "short lived",
+            Some(1),
+        )
+        .unwrap();
         // artificially age it
         conn.execute(
             "UPDATE bus_messages SET created_at = created_at - 10000 WHERE scope_id = ?1",
@@ -403,7 +476,17 @@ mod tests {
     fn list_limits_and_ordering() {
         let (conn, sc) = setup();
         for i in 0..5 {
-            send(&conn, sc.id, "a", None, None, "general", &format!("msg {i}"), None).unwrap();
+            send(
+                &conn,
+                sc.id,
+                "a",
+                None,
+                None,
+                "general",
+                &format!("msg {i}"),
+                None,
+            )
+            .unwrap();
         }
         let all = list(&conn, sc.id, None, 10).unwrap();
         assert_eq!(all.len(), 5);
@@ -435,7 +518,17 @@ mod tests {
     #[test]
     fn ttl_zero_expires_immediately() {
         let (conn, sc) = setup();
-        send(&conn, sc.id, "a", None, None, "general", "expire now", Some(0)).unwrap();
+        send(
+            &conn,
+            sc.id,
+            "a",
+            None,
+            None,
+            "general",
+            "expire now",
+            Some(0),
+        )
+        .unwrap();
         let msgs = poll(&conn, sc.id, "opencode", None, 10).unwrap();
         // ttl 0 means created_at + 0 <= now, so expired by the time we poll (now has advanced by 1ms due to now() monotonic)
         assert_eq!(msgs.len(), 0);
@@ -460,7 +553,14 @@ mod tests {
         let conn = db::open_memory().unwrap();
         let sc = scope::resolve(&conn, Some("/tmp/concurrent-bus"), Path::new("/")).unwrap();
         // Use a file-backed DB for real concurrency
-        let dir = std::env::temp_dir().join(format!("fm-bus-conc-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
+        let dir = std::env::temp_dir().join(format!(
+            "fm-bus-conc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bus.db");
         let handles: Vec<_> = (0..8)
@@ -468,9 +568,20 @@ mod tests {
                 let path = path.clone();
                 std::thread::spawn(move || {
                     let c = crate::db::open(&path).unwrap();
-                    let sc = scope::resolve(&c, Some("/tmp/concurrent-bus"), Path::new("/")).unwrap();
+                    let sc =
+                        scope::resolve(&c, Some("/tmp/concurrent-bus"), Path::new("/")).unwrap();
                     for j in 0..5 {
-                        send(&c, sc.id, "agent", None, None, "general", &format!("msg {i}-{j}"), None).unwrap();
+                        send(
+                            &c,
+                            sc.id,
+                            "agent",
+                            None,
+                            None,
+                            "general",
+                            &format!("msg {i}-{j}"),
+                            None,
+                        )
+                        .unwrap();
                     }
                 })
             })
@@ -489,7 +600,17 @@ mod tests {
     fn render_inbox_respects_budget() {
         let (conn, sc) = setup();
         for i in 0..10 {
-            send(&conn, sc.id, "a", None, None, "general", &format!("message number {}", i), None).unwrap();
+            send(
+                &conn,
+                sc.id,
+                "a",
+                None,
+                None,
+                "general",
+                &format!("message number {}", i),
+                None,
+            )
+            .unwrap();
         }
         let msgs = pending(&conn, sc.id, "x", None, 10).unwrap();
         assert_eq!(msgs.len(), 10);
@@ -501,7 +622,10 @@ mod tests {
         assert!(lines < 10, "budget should have truncated: {rendered}");
         // Large budget contains all
         let rendered2 = render_inbox(&msgs, 10000).unwrap();
-        assert_eq!(rendered2.lines().filter(|l| l.starts_with("- [")).count(), 10);
+        assert_eq!(
+            rendered2.lines().filter(|l| l.starts_with("- [")).count(),
+            10
+        );
         // Empty returns None
         assert!(render_inbox(&[], 100).is_none());
     }
@@ -510,7 +634,17 @@ mod tests {
     fn poll_with_limit() {
         let (conn, sc) = setup();
         for i in 0..10 {
-            send(&conn, sc.id, "a", None, None, "general", &format!("m{i}"), None).unwrap();
+            send(
+                &conn,
+                sc.id,
+                "a",
+                None,
+                None,
+                "general",
+                &format!("m{i}"),
+                None,
+            )
+            .unwrap();
         }
         let first = poll(&conn, sc.id, "x", None, 3).unwrap();
         assert_eq!(first.len(), 3);

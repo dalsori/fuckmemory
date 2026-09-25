@@ -39,16 +39,23 @@ fuckmemory session end release                          # cerrarla explícitamen
 - **Sin modelo.** El contexto es un render acotado de lo ya guardado, así que el
   traspaso no cuesta nada y nunca puede comerse la ventana de contexto.
 
+## Heartbeats — quién sigue trabajando
+
+Cada `hook prompt` toca un heartbeat por agente y proyecto (`heartbeats`, ventana 3m). `session list` lo muestra estilo herdr:
+
+```
+● opencode       working 2026-09-25
+○ claude-code    idle    2026-09-25
+```
+
+`● working` = visto hace <3m; `○ idle` en caso contrario. Sin servidor, solo SQLite.
+
 ## Flujo recomendado
 
 1. Cuando empieces algo no trivial, `session start <nombre> --goal "..."`.
-2. Trabaja en el agente que quieras. `session list` muestra las sesiones de un
-   proyecto y qué agentes escribieron en cada una.
-3. Cuando otro agente (o una conversación nueva) retome el trabajo, el contexto
-   se devuelve automáticamente en el primer prompt. `session show <nombre>` da
-   la misma narrativa bajo demanda.
-4. Cuando el trabajo se entregue, `session end <nombre>` para que el siguiente
-   tramo arranque limpio.
+2. Trabaja en el agente que quieras. `session list` muestra las sesiones y los heartbeats.
+3. Cuando otro agente retome el trabajo, el contexto se devuelve automáticamente en el primer prompt. `session show <nombre>` da la misma narrativa bajo demanda.
+4. Cuando el trabajo se entregue, `session end <nombre>` para que el siguiente tramo arranque limpio.
 
 El traspaso se puede apagar (`[autorecall] session = false`) y la ventana de
 inactividad se ajusta (`[session] idle_hours = 24`).

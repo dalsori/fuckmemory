@@ -37,11 +37,26 @@ fuckmemory session end release                         # close it explicitly
 - **Model-free.** The context is a bounded render of what is already stored, so
   the "handoff" costs nothing to build and can never eat a context window.
 
+## Heartbeats — who is still working
+
+Every `hook prompt` touches a per-agent, per-scope heartbeat (`heartbeats` table, 3 min window). `session list` renders it herdr-style:
+
+```
+NAME                 STATE  OPENED     LAST        EPS  agents
+work-2026-09-25      open   2026-09-25 2026-09-25    2  claude-code,opencode
+
+agents (last seen):
+  ● opencode       working 2026-09-25
+  ● claude-code    working 2026-09-25
+```
+
+`● working` means seen <3 min ago; `○ idle` otherwise. No server, just SQLite.
+
 ## Recommended workflow
 
 1. When you start something non-trivial, `session start <name> --goal "..."`.
 2. Work in whatever agent you like. `session list` shows the sessions of a
-   project and which agents wrote into each.
+   project and which agents wrote into each, plus the heartbeat footer.
 3. When another agent (or a fresh conversation) picks the work up, the context
    is handed back automatically on the first prompt. `session show <name>` gives
    the same narrative on demand.

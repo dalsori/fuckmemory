@@ -8,6 +8,8 @@
 | [Comandos](commands.md) | El CLI de uso diario: remember, recall, forget, timeline, explain |
 | [Tarea](task.md) | Retomar un trabajo después de una interrupción |
 | [Sesión](session.md) | Agrupar el trabajo de un proyecto entre agentes y retomarlo |
+| [Bus](bus.md) | Mensajería activa entre agentes en el mismo proyecto |
+| [Plugins](plugins.md) | Extiende con hooks personalizados (estilo herdr) |
 | [Configuración](config.md) | Archivo de ajustes, scopes, variables de entorno |
 | [Mantenimiento](maintenance.md) | Consolidar, podar, doctor, bench, export/import |
 | [Solución de problemas](troubleshooting.md) | Problemas comunes y sus arreglos |

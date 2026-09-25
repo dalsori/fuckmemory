@@ -14,6 +14,9 @@ one that matches your goal.
 | Store every prompt automatically | [autosave](en/autosave.md) |
 | Store and search memories by hand | [commands](en/commands.md) |
 | Resume work after an interruption | [task](en/task.md) |
+| Group work across agents | [session](en/session.md) |
+| Message another agent in the same project | [bus](en/bus.md) |
+| Extend with plugins | [plugins](en/plugins.md) |
 | Tune settings, scopes, env vars | [config](en/config.md) |
 | Keep the store healthy, upgrade, export | [maintenance](en/maintenance.md) |
 | Something is wrong | [troubleshooting](en/troubleshooting.md) |

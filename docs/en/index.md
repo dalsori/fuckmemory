@@ -8,6 +8,8 @@
 | [Commands](commands.md) | The everyday CLI: remember, recall, forget, timeline, explain |
 | [Task](task.md) | Resume work after an interruption |
 | [Session](session.md) | Group a project's work across agents and resume it |
+| [Bus](bus.md) | Active messaging between agents in the same project |
+| [Plugins](plugins.md) | Extend with custom hooks (herdr-style) |
 | [Config](config.md) | Settings file, scopes, environment variables |
 | [Maintenance](maintenance.md) | Consolidate, prune, doctor, bench, export/import |
 | [Troubleshooting](troubleshooting.md) | Common problems and fixes |
